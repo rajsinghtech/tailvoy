@@ -22,7 +22,7 @@ Authorization is driven entirely by Tailscale ACL grants using the `rajsingh.inf
 
 | Dimension | Controls | Source |
 |-----------|----------|--------|
-| `listeners` | Which named listeners a peer can connect to | Listener name from policy.yaml |
+| `listeners` | Which named listeners a peer can connect to | Listener name from policy.yaml (static) or Envoy dynamic listener name (discovery) |
 | `routes` | Which HTTP/gRPC paths are accessible (L7 only) | Request path |
 | `hostnames` | Which hostnames are allowed (SNI or Host header) | TLS ClientHello SNI / HTTP Host header |
 
@@ -31,6 +31,15 @@ Authorization is driven entirely by Tailscale ACL grants using the `rajsingh.inf
 **Omitted dimension**: unrestricted on that dimension.
 
 The policy file (`policy.yaml`) only defines infrastructure -- Tailscale identity and listener configuration. All authorization lives in your Tailscale ACL.
+
+## Listener modes
+
+tailvoy supports two mutually exclusive ways to define listeners:
+
+- **Static listeners** (`listeners[]`): You declare every listener explicitly in policy.yaml. Full control over names, ports, and protocols.
+- **Discovery mode** (`discovery`): tailvoy polls Envoy's admin API to auto-discover listeners. No listener config needed -- tailvoy creates and removes tsnet listeners dynamically as Envoy's configuration changes.
+
+Discovery mode is ideal for Envoy Gateway deployments where listeners are managed by Gateway API resources and change over time. Static mode is better when you want explicit control or are running standalone.
 
 ## Cap rule schema
 
@@ -284,7 +293,51 @@ For L7 listeners, hostnames match against the HTTP `Host` header (or `:authority
 
 This grants access only to `api.example.com` on the HTTP listener, and only for `/v1/*` paths. All three dimensions must match (AND).
 
-### Multi-listener gateway
+### Discovery mode (Envoy Gateway)
+
+Instead of declaring listeners manually, let tailvoy discover them from Envoy's admin API. Listeners are created and removed automatically as Gateway resources change.
+
+**policy.yaml:**
+```yaml
+tailscale:
+  hostname: "my-gateway"
+  authkey: "${TS_AUTHKEY}"
+  ephemeral: true
+
+discovery:
+  envoyAdmin: "http://127.0.0.1:19000"
+  envoyAddress: "127.0.0.1"
+  pollInterval: "5s"
+  proxyProtocol: v2
+```
+
+tailvoy polls Envoy's `/config_dump` endpoint, parses dynamic listeners, and creates tsnet listeners for each one. L7 detection is automatic -- if a listener's filter chain contains `http_connection_manager`, tailvoy enables L7 policy for it.
+
+Discovered listener names follow Envoy Gateway's naming convention: `<namespace>/<gateway>/<listener>` (e.g., `default/eg/http`). Use these names in your ACL grants:
+
+```jsonc
+{
+    "src": ["tag:frontend"],
+    "dst": ["tag:my-gateway"],
+    "app": {
+        "rajsingh.info/cap/tailvoy": [{
+            "listeners": ["default/eg/http"],
+            "routes": ["/api/*", "/health"]
+        }]
+    }
+}
+```
+
+For L7 listeners, SecurityPolicy `contextExtensions` must also use the full listener name:
+
+```yaml
+contextExtensions:
+  - name: listener
+    type: Value
+    value: "default/eg/http"
+```
+
+### Multi-listener gateway (static)
 
 A single tailvoy instance handling HTTP, TCP, UDP, gRPC, and TLS -- each on its own port.
 
@@ -394,8 +447,8 @@ Multiple matching grants produce multiple cap rules. Rules are evaluated indepen
 
 ## Deployment modes
 
-- **Standalone** (`-standalone`): tailvoy auto-generates Envoy bootstrap config and manages Envoy as a subprocess. No Envoy YAML needed.
-- **Envoy Gateway data plane**: tailvoy replaces the default Envoy image via the `EnvoyProxy` CRD, acting as the data plane for [Envoy Gateway](https://gateway.envoyproxy.io/). EG manages routing via xDS while tailvoy handles Tailscale ingress and cap-based policy.
+- **Standalone** (`-standalone`): tailvoy auto-generates Envoy bootstrap config and manages Envoy as a subprocess. No Envoy YAML needed. Uses static listeners.
+- **Envoy Gateway data plane**: tailvoy replaces the default Envoy image via the `EnvoyProxy` CRD, acting as the data plane for [Envoy Gateway](https://gateway.envoyproxy.io/). EG manages routing via xDS while tailvoy handles Tailscale ingress and cap-based policy. Supports both static listeners and discovery mode (recommended).
 
 ## Supported protocols
 
@@ -520,7 +573,7 @@ docker run -e TS_AUTHKEY=tskey-auth-... \
 
 ## Reference
 
-### Listener options
+### Listener options (static mode)
 
 | Field | Description |
 |-------|-------------|
@@ -530,6 +583,18 @@ docker run -e TS_AUTHKEY=tskey-auth-... \
 | `forward` | Backend address to proxy to |
 | `proxy_protocol` | Set to `v2` to prepend a PROXY protocol v2 header. Preserves the caller's Tailscale IP so Envoy and your backend see the real client address. |
 | `l7_policy` | Set to `true` to route through Envoy with ext_authz for path-level policy. When `false`, the listener is L4-only (pure TCP/UDP forwarding after cap check). |
+
+### Discovery options
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `envoyAdmin` | yes | Envoy admin API URL (e.g. `http://127.0.0.1:19000`) |
+| `envoyAddress` | yes | Address to forward traffic to (the Envoy data plane, e.g. `127.0.0.1`) |
+| `pollInterval` | no | How often to poll for changes (default `10s`) |
+| `listenerFilter` | no | Regex to include only matching listener names |
+| `proxyProtocol` | no | Set to `v2` to inject PROXY protocol v2 on all discovered listeners |
+
+Discovery auto-detects L7 listeners by inspecting Envoy's filter chains for `http_connection_manager`. Listener names, ports, and protocols are all derived from the Envoy config -- no manual mapping needed.
 
 ### Cap rule fields
 

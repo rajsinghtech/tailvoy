@@ -1,0 +1,12 @@
+# Binaries
+/tailvoy
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+
+# Go build cache
+*.out

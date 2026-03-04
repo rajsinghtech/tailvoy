@@ -10,3 +10,7 @@
 
 # Go build cache
 *.out
+
+# Environment / runtime
+.env
+tsnet-*

@@ -1,0 +1,54 @@
+# Example tailvoy policy
+# Copy and modify for your deployment
+
+tailscale:
+  hostname: "tailvoy-gw"
+  authkey: "${TS_AUTHKEY}"
+  ephemeral: true
+
+listeners:
+  - name: https
+    protocol: tcp
+    listen: ":443"
+    forward: "127.0.0.1:10443"
+    proxy_protocol: v2
+    l7_policy: true
+
+  - name: http
+    protocol: tcp
+    listen: ":80"
+    forward: "127.0.0.1:10080"
+    proxy_protocol: v2
+    l7_policy: true
+
+l4_rules:
+  - match:
+      listener: https
+    allow:
+      any_tailscale: true
+
+  - match:
+      listener: http
+    allow:
+      any_tailscale: true
+
+l7_rules:
+  - match:
+      listener: https
+      path: "/admin/*"
+    allow:
+      tags: ["tag:admin"]
+
+  - match:
+      listener: https
+      path: "/*"
+    allow:
+      any_tailscale: true
+
+  - match:
+      listener: http
+      path: "/*"
+    allow:
+      any_tailscale: true
+
+default: deny

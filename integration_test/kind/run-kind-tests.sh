@@ -230,9 +230,9 @@ sleep 5
 
 # Smoke test
 echo "=== Smoke test ==="
-SMOKE=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 15 "http://$IP:80/" 2>&1 || true)
+SMOKE=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 15 "http://$IP:80/health" 2>&1 || true)
 if [ "$SMOKE" != "200" ]; then
-    echo "FATAL: Smoke test failed (GET / returned $SMOKE)"
+    echo "FATAL: Smoke test failed (GET /health returned $SMOKE)"
     dump_logs
     exit 1
 fi
@@ -246,11 +246,16 @@ echo "========================================"
 echo "  HTTPRoute TESTS"
 echo "========================================"
 
-assert_http "HTTP: GET / allow" "http://$IP:80/" "200"
+# Allowed paths (cap grants: /public/*, /health, /api/*, /admin/*)
 assert_http "HTTP: GET /public/hello allow" "http://$IP:80/public/hello" "200"
 assert_http "HTTP: GET /health allow" "http://$IP:80/health" "200"
+assert_http "HTTP: GET /api/data allow" "http://$IP:80/api/data" "200"
 assert_http "HTTP: GET /admin/settings allow" "http://$IP:80/admin/settings" "200"
-assert_http "HTTP: GET /any/path allow" "http://$IP:80/any/path" "200"
+
+# Denied paths (not in cap grants)
+assert_http "HTTP: GET / deny" "http://$IP:80/" "403"
+assert_http "HTTP: GET /secret/data deny" "http://$IP:80/secret/data" "403"
+assert_http "HTTP: GET /internal/config deny" "http://$IP:80/internal/config" "403"
 
 # Identity headers
 BODY=$(curl -sf --max-time 10 "http://$IP:80/public/headers" 2>&1 || true)

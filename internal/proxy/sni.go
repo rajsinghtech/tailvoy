@@ -50,7 +50,7 @@ func parseSNI(data []byte) string {
 	recordLen := int(binary.BigEndian.Uint16(data[3:5]))
 	payload := data[5:]
 	if len(payload) < recordLen {
-		payload = payload[:len(payload)] // use what we have
+		// use what we have
 	} else {
 		payload = payload[:recordLen]
 	}
@@ -60,12 +60,8 @@ func parseSNI(data []byte) string {
 		return ""
 	}
 
-	// Handshake length (3 bytes).
-	hsLen := int(payload[1])<<16 | int(payload[2])<<8 | int(payload[3])
+	// Skip handshake header (type + 3-byte length). May be truncated.
 	payload = payload[4:]
-	if len(payload) < hsLen {
-		// truncated but continue with what we have
-	}
 
 	// ClientHello body: version(2) + random(32) = 34 bytes minimum.
 	if len(payload) < 34 {
@@ -103,9 +99,7 @@ func parseSNI(data []byte) string {
 	extLen := int(binary.BigEndian.Uint16(payload[pos : pos+2]))
 	pos += 2
 	extEnd := pos + extLen
-	if extEnd > len(payload) {
-		extEnd = len(payload)
-	}
+	extEnd = min(extEnd, len(payload))
 
 	// Iterate extensions looking for SNI (type 0x0000).
 	for pos+4 <= extEnd {

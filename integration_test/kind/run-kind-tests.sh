@@ -246,20 +246,37 @@ echo "========================================"
 echo "  HTTPRoute TESTS"
 echo "========================================"
 
-# Allowed paths (cap grants: /public/*, /health, /api/*, /admin/*)
+# Cap rule: {"listeners": ["http"], "routes": ["/public/*", "/health", "/api/*", "/admin/*"]}
+# SecurityPolicy contextExtensions: listener=http
+
+# Allow: prefix match /public/*
 assert_http "HTTP: GET /public/hello allow" "http://$IP:80/public/hello" "200"
 assert_http "HTTP: GET /public/nested/path allow" "http://$IP:80/public/nested/path" "200"
+
+# Allow: exact match /health
 assert_http "HTTP: GET /health allow" "http://$IP:80/health" "200"
+
+# Allow: prefix match /api/*
 assert_http "HTTP: GET /api/data allow" "http://$IP:80/api/data" "200"
 assert_http "HTTP: GET /api/v1/users allow" "http://$IP:80/api/v1/users" "200"
+
+# Allow: prefix match /admin/*
 assert_http "HTTP: GET /admin/settings allow" "http://$IP:80/admin/settings" "200"
 
-# Denied paths (not in cap grants)
+# Deny: root path not in cap routes
 assert_http "HTTP: GET / deny" "http://$IP:80/" "403"
+
+# Deny: paths not matching any cap route
 assert_http "HTTP: GET /secret/data deny" "http://$IP:80/secret/data" "403"
 assert_http "HTTP: GET /internal/config deny" "http://$IP:80/internal/config" "403"
 assert_http "HTTP: GET /login deny" "http://$IP:80/login" "403"
 assert_http "HTTP: GET /dashboard deny" "http://$IP:80/dashboard" "403"
+
+# Deny: exact match boundary — /health with trailing slash is not /health
+assert_http "HTTP: GET /health/ deny (exact match)" "http://$IP:80/health/" "403"
+
+# Deny: similar prefix but no match — /apiary is not /api/*
+assert_http "HTTP: GET /apiary deny (not /api/*)" "http://$IP:80/apiary" "403"
 
 # Identity headers
 BODY=$(curl -sf --max-time 10 "http://$IP:80/public/headers" 2>&1 || true)
@@ -279,8 +296,8 @@ echo "========================================"
 echo "  TCPRoute TESTS"
 echo "========================================"
 
-# L4 only (l7_policy: false) — having the cap grants peer-level access, no path filtering.
-# Allow: tag:kind has rajsingh.info/cap/tailvoy → connection permitted.
+# Cap rule: {"listeners": ["tcp", "udp", "tls"]} — no routes = L4 access only.
+# HasAccess(listener="tcp", sni="", id) matches because "tcp" is in listeners.
 TCP_RESP=$(echo "hello" | $NC_CMD -w 5 "$IP" 5432 2>/dev/null || true)
 if echo "$TCP_RESP" | grep -q "echo: hello"; then
     test_pass "TCP: echo allow (cap grants L4 access)"
@@ -303,7 +320,7 @@ echo "========================================"
 echo "  UDPRoute TESTS"
 echo "========================================"
 
-# L4 only (l7_policy: false) — cap grants peer-level access, no path filtering.
+# Cap rule: {"listeners": ["tcp", "udp", "tls"]} — "udp" in listeners = L4 access.
 # Keep stdin open with sleep so ncat waits for the response before exiting.
 UDP_RESP=$({ echo -n "hello"; sleep 3; } | $NC_CMD -u -w 5 "$IP" 9053 2>/dev/null || true)
 if echo "$UDP_RESP" | grep -q "echo: hello"; then
@@ -330,7 +347,7 @@ echo "========================================"
 echo "  TLSRoute TESTS"
 echo "========================================"
 
-# L4 only (l7_policy: false) — TLS passthrough, cap grants peer-level access.
+# Cap rule: {"listeners": ["tcp", "udp", "tls"]} — "tls" in listeners = L4 passthrough access.
 TLS_HTTP=$(curl -sf -o /dev/null -w "%{http_code}" --insecure \
     --resolve "secure.tailvoy.test:443:$IP" \
     --max-time 10 \
@@ -370,10 +387,10 @@ echo "  GRPCRoute TESTS"
 echo "========================================"
 
 if [ "$HAS_GRPCURL" = "true" ]; then
-    # L7 (l7_policy: true) — ext_authz evaluates cap routes for gRPC paths.
-    # Cap grants allow /grpc.health.v1.Health/*
+    # Cap rule: {"listeners": ["grpc"], "routes": ["/grpc.health.v1.Health/*"]}
+    # SecurityPolicy contextExtensions: listener=grpc
 
-    # Allowed: health check (path: /grpc.health.v1.Health/Check)
+    # Allow: /grpc.health.v1.Health/Check matches prefix /grpc.health.v1.Health/*
     GRPC_OUT=$(grpcurl -plaintext -max-time 10 "$IP:50051" grpc.health.v1.Health/Check 2>&1 || true)
     if echo "$GRPC_OUT" | grep -q "SERVING"; then
         test_pass "gRPC: health check allow"
@@ -381,7 +398,7 @@ if [ "$HAS_GRPCURL" = "true" ]; then
         test_fail "gRPC: health check allow" "got '$GRPC_OUT'"
     fi
 
-    # Allowed: named service health check (same path prefix)
+    # Allow: named service health check (same path prefix /grpc.health.v1.Health/*)
     GRPC_OUT2=$(grpcurl -plaintext -max-time 10 -d '{"service":"echo"}' "$IP:50051" grpc.health.v1.Health/Check 2>&1 || true)
     if echo "$GRPC_OUT2" | grep -q "SERVING"; then
         test_pass "gRPC: named service health allow"
@@ -389,13 +406,12 @@ if [ "$HAS_GRPCURL" = "true" ]; then
         test_fail "gRPC: named service health allow" "got '$GRPC_OUT2'"
     fi
 
-    # Denied: reflection (path: /grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo)
-    # Not in cap grants — ext_authz should deny with PERMISSION_DENIED
+    # Deny: reflection uses /grpc.reflection.v1alpha.ServerReflection/* — not in cap routes
     GRPC_DENY=$(grpcurl -plaintext -max-time 10 "$IP:50051" list 2>&1 || true)
     if echo "$GRPC_DENY" | grep -qi "PermissionDenied\|code = 7\|PERMISSION_DENIED"; then
-        test_pass "gRPC: reflection deny (not in cap grants)"
+        test_pass "gRPC: reflection deny (not in cap routes)"
     else
-        test_fail "gRPC: reflection deny (not in cap grants)" "got '$GRPC_DENY'"
+        test_fail "gRPC: reflection deny (not in cap routes)" "got '$GRPC_DENY'"
     fi
 else
     echo "  SKIP: grpcurl not found, skipping gRPC tests"

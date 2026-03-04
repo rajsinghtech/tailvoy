@@ -60,10 +60,18 @@ jobs:
 
       - name: Apply test ACL
         run: |
-          ./integration_test/scripts/update-acl.sh \
-            "${{ steps.token.outputs.access_token }}" \
-            "${{ steps.create.outputs.tailnet_name }}" \
-            ./integration_test/scripts/test-acl.json
+          for i in 1 2 3 4 5; do
+            if ./integration_test/scripts/update-acl.sh \
+              "${{ steps.token.outputs.access_token }}" \
+              "${{ steps.create.outputs.tailnet_name }}" \
+              ./integration_test/scripts/test-acl.json; then
+              exit 0
+            fi
+            echo "ACL update attempt $i failed, retrying in 5s..."
+            sleep 5
+          done
+          echo "ACL update failed after 5 attempts"
+          exit 1
 
       - name: Create auth key
         id: authkey

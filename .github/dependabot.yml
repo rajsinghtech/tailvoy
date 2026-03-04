@@ -8,6 +8,14 @@ updates:
       - dependencies
       - maintenance
 
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    labels:
+      - dependencies
+      - maintenance
+
   - package-ecosystem: docker
     directory: /
     schedule:
@@ -16,8 +24,48 @@ updates:
       - dependencies
       - maintenance
 
-  - package-ecosystem: github-actions
-    directory: /
+  - package-ecosystem: docker
+    directory: /integration_test/backend
+    schedule:
+      interval: weekly
+    labels:
+      - dependencies
+      - maintenance
+
+  - package-ecosystem: docker
+    directory: /integration_test/backend/tcp-echo
+    schedule:
+      interval: weekly
+    labels:
+      - dependencies
+      - maintenance
+
+  - package-ecosystem: docker
+    directory: /integration_test/backend/udp-echo
+    schedule:
+      interval: weekly
+    labels:
+      - dependencies
+      - maintenance
+
+  - package-ecosystem: docker
+    directory: /integration_test/backend/tls-echo
+    schedule:
+      interval: weekly
+    labels:
+      - dependencies
+      - maintenance
+
+  - package-ecosystem: docker
+    directory: /integration_test/backend/grpc-echo
+    schedule:
+      interval: weekly
+    labels:
+      - dependencies
+      - maintenance
+
+  - package-ecosystem: docker-compose
+    directory: /integration_test
     schedule:
       interval: weekly
     labels:

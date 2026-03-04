@@ -1,37 +1,74 @@
 # tailvoy
 
-Tailscale identity-aware firewall for Envoy. tailvoy joins your tailnet, identifies callers via WhoIs, and enforces fine-grained L4/L7 access policies before traffic reaches your backend.
+Tailscale identity-aware proxy for Envoy. tailvoy joins your tailnet, identifies callers via WhoIs, and enforces access policy using [Tailscale peer capabilities](https://tailscale.com/kb/1324/acl-grants#app-capabilities) before traffic reaches your backend.
 
 ```
 Tailnet Client (100.x.x.x)
         │
-   tsnet Listener ── L4 policy (identity gating per listener)
+   tsnet Listener ── L4 check (has tailvoy cap?)
         │
    TCP/UDP Proxy ── PROXY protocol v2 (preserves client IP)
         │
-      Envoy ── L7 policy via ext_authz (path, host, method)
+      Envoy ── L7 check via gRPC ext_authz (cap routes match path?)
         │
    Backend Service
 ```
 
 ## How it works
 
-tailvoy embeds [tsnet](https://pkg.go.dev/tailscale.com/tsnet) to join the tailnet directly — no sidecar Tailscale daemon needed. Every inbound connection triggers a WhoIs lookup to resolve the caller's Tailscale identity (user, tags, node). L4 rules gate connections at the listener level. For HTTP/gRPC traffic, tailvoy runs a gRPC [ext_authz](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_authz_filter) server that Envoy consults on every request, enabling path/host/method-level policies. In EG data plane mode, each SecurityPolicy uses `contextExtensions` to pass the listener name to the auth server per-route, so policy evaluation targets the correct listener.
+tailvoy embeds [tsnet](https://pkg.go.dev/tailscale.com/tsnet) to join the tailnet directly — no sidecar Tailscale daemon needed. Every inbound connection triggers a WhoIs lookup to resolve the caller's Tailscale identity and peer capabilities.
 
-tailvoy supports two deployment modes:
+Authorization is driven entirely by Tailscale ACL grants using the `rajsingh.info/cap/tailvoy` capability:
+
+- **L4 gating**: if the caller has the tailvoy cap, the connection is allowed. No cap = connection reset.
+- **L7 gating**: for HTTP/gRPC listeners, the cap's `routes` field controls which paths are accessible. tailvoy runs a gRPC [ext_authz](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_authz_filter) server that Envoy consults on every request.
+
+The policy file (`policy.yaml`) only defines infrastructure — tailscale identity and listener configuration. All authorization lives in your Tailscale ACL.
+
+### ACL grant example
+
+```jsonc
+// In your Tailscale ACL (policy.hujson)
+{
+    "grants": [
+        {
+            "src": ["alice@example.com"],
+            "dst": ["tag:my-gateway"],
+            "app": {
+                "rajsingh.info/cap/tailvoy": [{"routes": ["/api/*", "/health"]}]
+            }
+        },
+        {
+            "src": ["group:admins"],
+            "dst": ["tag:my-gateway"],
+            "app": {
+                "rajsingh.info/cap/tailvoy": [{"routes": ["/*"]}]
+            }
+        }
+    ]
+}
+```
+
+- `alice@example.com` can access `/api/*` and `/health` on the gateway
+- `group:admins` gets full access (`/*`)
+- Anyone without the cap is denied at L4
+- Multiple matching grants merge routes additively
+- A cap with no `routes` field grants full access (`/*`)
+
+### Deployment modes
 
 - **Standalone** (`-standalone`): tailvoy auto-generates Envoy bootstrap config and manages Envoy as a subprocess. No Envoy YAML needed.
-- **Envoy Gateway data plane**: tailvoy replaces the default Envoy image via the `EnvoyProxy` CRD, acting as the data plane for [Envoy Gateway](https://gateway.envoyproxy.io/). EG manages routing via xDS while tailvoy handles Tailscale ingress and identity-based policy.
+- **Envoy Gateway data plane**: tailvoy replaces the default Envoy image via the `EnvoyProxy` CRD, acting as the data plane for [Envoy Gateway](https://gateway.envoyproxy.io/). EG manages routing via xDS while tailvoy handles Tailscale ingress and cap-based policy.
 
 ## Supported protocols
 
 | Protocol | Listener | Policy |
 |----------|----------|--------|
-| TCP | `protocol: tcp` | L4 identity check |
-| UDP | `protocol: udp` | L4 identity check |
-| HTTP | TCP listener with `l7_policy: true` | L4 + L7 ext_authz (path/host/method) |
-| gRPC | TCP listener with `l7_policy: true` | L4 + L7 ext_authz (service/method path) |
-| TLS passthrough | TCP listener (no `l7_policy`) | L4 identity check only |
+| TCP | `protocol: tcp` | L4 cap check |
+| UDP | `protocol: udp` | L4 cap check |
+| HTTP | TCP listener with `l7_policy: true` | L4 cap check + L7 route matching via ext_authz |
+| gRPC | TCP listener with `l7_policy: true` | L4 cap check + L7 route matching via ext_authz |
+| TLS passthrough | TCP listener (no `l7_policy`) | L4 cap check only |
 
 ## Install
 
@@ -102,7 +139,7 @@ spec:
 
 EG's generated Envoy args are appended after `--` automatically.
 
-Then apply a SecurityPolicy with gRPC ext_authz and `contextExtensions` to pass the listener name:
+For L7 listeners, apply a SecurityPolicy with gRPC ext_authz:
 
 ```yaml
 apiVersion: gateway.envoyproxy.io/v1alpha1
@@ -120,15 +157,9 @@ spec:
         - name: tailvoy-authz
           namespace: envoy-gateway-system
           port: 9001
-    contextExtensions:
-      - name: listener
-        type: Value
-        value: "http"    # must match a listener name in the policy file
 ```
 
-The `contextExtensions` field tells Envoy to include `{"listener": "http"}` in the gRPC `CheckRequest` sent to the auth server. This is how tailvoy knows which listener's L7 rules to evaluate for each route. Without it, requests fall back to the `"default"` listener.
-
-> **Requires Envoy Gateway v1.7.0+** — `contextExtensions` support was added in [envoyproxy/gateway#7383](https://github.com/envoyproxy/gateway/pull/7383).
+> **Requires Envoy Gateway v1.7.0+** for gRPC ext_authz support.
 
 ### Flags
 
@@ -150,9 +181,9 @@ docker run -e TS_AUTHKEY=tskey-auth-... \
   -policy /policy.yaml -standalone
 ```
 
-## Policy
+## Policy file
 
-Policies are defined in YAML. Environment variables are expanded with `${VAR}` syntax.
+The policy file defines infrastructure only. Environment variables are expanded with `${VAR}` syntax.
 
 ```yaml
 tailscale:
@@ -177,72 +208,40 @@ listeners:
     protocol: tcp
     listen: ":9090"
     forward: "127.0.0.1:9090"
-
-l4_rules:
-  - match:
-      listener: https
-    allow:
-      any_tailscale: true
-
-  - match:
-      listener: dns
-    allow:
-      any_tailscale: true
-
-  - match:
-      listener: metrics
-    allow:
-      tags: ["tag:monitoring"]
-
-l7_rules:
-  - match:
-      listener: https
-      path: "/admin/*"
-      methods: ["GET", "POST"]
-    allow:
-      tags: ["tag:admin"]
-
-  - match:
-      listener: https
-      path: "/api/*"
-      host: "api.example.com"
-    allow:
-      users: ["alice@example.com"]
-
-  - match:
-      listener: https
-      path: "/health"
-    allow:
-      any_tailscale: true
-
-default: deny
 ```
 
 ### Listener options
 
 | Field | Description |
 |-------|-------------|
-| `name` | Listener identifier, referenced by rules |
+| `name` | Listener identifier |
 | `protocol` | `tcp` or `udp` |
 | `listen` | Address to bind (e.g. `:443`) |
 | `forward` | Backend address to proxy to |
 | `proxy_protocol` | Set to `v2` to prepend a PROXY protocol v2 header. Preserves the caller's Tailscale IP so Envoy and your backend see the real client address. |
-| `l7_policy` | Set to `true` to route through Envoy with ext_authz for HTTP-level rules. When `false`, the listener is L4-only (pure TCP/UDP forwarding after identity check). |
+| `l7_policy` | Set to `true` to route through Envoy with ext_authz for path-level policy. When `false`, the listener is L4-only (pure TCP/UDP forwarding after cap check). |
 
-### Policy reference
+### Route patterns
 
-**Identity matchers** (used in `allow` blocks):
+Routes in the tailvoy cap use glob-style matching:
 
-| Field | Description |
-|-------|-------------|
-| `any_tailscale: true` | Any authenticated Tailscale user |
-| `users` | List of Tailscale login names |
-| `tags` | List of Tailscale ACL tags |
-| `groups` | List of Tailscale groups |
+| Pattern | Matches |
+|---------|---------|
+| `/*` | All paths |
+| `/api/*` | `/api/`, `/api/users`, `/api/v1/foo` |
+| `/health` | Exactly `/health` |
+| `/admin/*` | `/admin/`, `/admin/settings`, `/admin/users/1` |
 
-**L4 rules** match on `listener` name and gate entire connections.
+## Identity headers
 
-**L7 rules** add `path` (glob patterns with `*`), `host` (supports `*.domain`), and `methods` (HTTP methods). Rules are evaluated first-match-wins.
+On allowed L7 requests, tailvoy injects identity headers into the request before it reaches your backend:
+
+| Header | Value |
+|--------|-------|
+| `X-Tailscale-User` | Tailscale login (e.g. `alice@example.com`) |
+| `X-Tailscale-Node` | Node FQDN (e.g. `alices-laptop.tailnet.ts.net`) |
+| `X-Tailscale-Ip` | Tailscale IP (e.g. `100.64.0.1`) |
+| `X-Tailscale-Tags` | Comma-separated ACL tags |
 
 ## Development
 

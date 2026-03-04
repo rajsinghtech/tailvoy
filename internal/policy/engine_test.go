@@ -98,7 +98,7 @@ func TestCheckAccess_MultipleRoutes(t *testing.T) {
 		{"/api/data", true},
 		{"/admin/settings", true},
 		{"/health", true},
-		{"/health/", false},  // exact match: no trailing slash
+		{"/health/", false}, // exact match: no trailing slash
 		{"/unknown", false},
 		{"/", false},
 	}
@@ -460,11 +460,11 @@ func TestCheckAccess_MergedRoutes(t *testing.T) {
 		{"/admin/deep/nested/path", true},
 		{"/health", true},
 		{"/metrics", true},
-		{"/health/", false},    // exact, no trailing slash
-		{"/metrics/", false},   // exact, no trailing slash
-		{"/dashboard", false},  // not in any route
-		{"/", false},           // root not granted
-		{"/apiary", false},     // similar prefix, no match
+		{"/health/", false},   // exact, no trailing slash
+		{"/metrics/", false},  // exact, no trailing slash
+		{"/dashboard", false}, // not in any route
+		{"/", false},          // root not granted
+		{"/apiary", false},    // similar prefix, no match
 		{"/administrator", false},
 	}
 

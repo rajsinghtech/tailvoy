@@ -13,7 +13,7 @@
       "dst": ["tag:kind"],
       "app": {
         "rajsingh.info/cap/tailvoy": [
-          {"routes": ["/public/*", "/health", "/api/*", "/admin/*"]}
+          {"routes": ["/public/*", "/health", "/api/*", "/admin/*", "/grpc.health.v1.Health/*"]}
         ]
       }
     }

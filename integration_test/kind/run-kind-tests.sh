@@ -248,14 +248,18 @@ echo "========================================"
 
 # Allowed paths (cap grants: /public/*, /health, /api/*, /admin/*)
 assert_http "HTTP: GET /public/hello allow" "http://$IP:80/public/hello" "200"
+assert_http "HTTP: GET /public/nested/path allow" "http://$IP:80/public/nested/path" "200"
 assert_http "HTTP: GET /health allow" "http://$IP:80/health" "200"
 assert_http "HTTP: GET /api/data allow" "http://$IP:80/api/data" "200"
+assert_http "HTTP: GET /api/v1/users allow" "http://$IP:80/api/v1/users" "200"
 assert_http "HTTP: GET /admin/settings allow" "http://$IP:80/admin/settings" "200"
 
 # Denied paths (not in cap grants)
 assert_http "HTTP: GET / deny" "http://$IP:80/" "403"
 assert_http "HTTP: GET /secret/data deny" "http://$IP:80/secret/data" "403"
 assert_http "HTTP: GET /internal/config deny" "http://$IP:80/internal/config" "403"
+assert_http "HTTP: GET /login deny" "http://$IP:80/login" "403"
+assert_http "HTTP: GET /dashboard deny" "http://$IP:80/dashboard" "403"
 
 # Identity headers
 BODY=$(curl -sf --max-time 10 "http://$IP:80/public/headers" 2>&1 || true)
@@ -275,18 +279,20 @@ echo "========================================"
 echo "  TCPRoute TESTS"
 echo "========================================"
 
+# L4 only (l7_policy: false) — having the cap grants peer-level access, no path filtering.
+# Allow: tag:kind has rajsingh.info/cap/tailvoy → connection permitted.
 TCP_RESP=$(echo "hello" | $NC_CMD -w 5 "$IP" 5432 2>/dev/null || true)
 if echo "$TCP_RESP" | grep -q "echo: hello"; then
-    test_pass "TCP: echo hello"
+    test_pass "TCP: echo allow (cap grants L4 access)"
 else
-    test_fail "TCP: echo hello" "got '$TCP_RESP'"
+    test_fail "TCP: echo allow (cap grants L4 access)" "got '$TCP_RESP'"
 fi
 
 TCP_RESP2=$(echo "world" | $NC_CMD -w 5 "$IP" 5432 2>/dev/null || true)
 if echo "$TCP_RESP2" | grep -q "echo: world"; then
-    test_pass "TCP: echo world (second connection)"
+    test_pass "TCP: second connection allow"
 else
-    test_fail "TCP: echo world (second connection)" "got '$TCP_RESP2'"
+    test_fail "TCP: second connection allow" "got '$TCP_RESP2'"
 fi
 
 # =====================================================
@@ -297,11 +303,11 @@ echo "========================================"
 echo "  UDPRoute TESTS"
 echo "========================================"
 
-# UDP test: send a packet and read response with timeout.
+# L4 only (l7_policy: false) — cap grants peer-level access, no path filtering.
 # Keep stdin open with sleep so ncat waits for the response before exiting.
 UDP_RESP=$({ echo -n "hello"; sleep 3; } | $NC_CMD -u -w 5 "$IP" 9053 2>/dev/null || true)
 if echo "$UDP_RESP" | grep -q "echo: hello"; then
-    test_pass "UDP: echo hello"
+    test_pass "UDP: echo allow (cap grants L4 access)"
 else
     # Try alternate approach with socat if available
     if command -v socat &>/dev/null; then
@@ -310,9 +316,9 @@ else
         UDP_RESP2=$(bash -c "exec 3<>/dev/udp/$IP/9053; echo -n 'hello' >&3; read -t 5 resp <&3; echo \"\$resp\"" 2>/dev/null || true)
     fi
     if echo "$UDP_RESP2" | grep -q "echo: hello"; then
-        test_pass "UDP: echo hello"
+        test_pass "UDP: echo allow (cap grants L4 access)"
     else
-        test_fail "UDP: echo hello" "ncat='$UDP_RESP', fallback='$UDP_RESP2'"
+        test_fail "UDP: echo allow (cap grants L4 access)" "ncat='$UDP_RESP', fallback='$UDP_RESP2'"
     fi
 fi
 
@@ -324,14 +330,15 @@ echo "========================================"
 echo "  TLSRoute TESTS"
 echo "========================================"
 
+# L4 only (l7_policy: false) — TLS passthrough, cap grants peer-level access.
 TLS_HTTP=$(curl -sf -o /dev/null -w "%{http_code}" --insecure \
     --resolve "secure.tailvoy.test:443:$IP" \
     --max-time 10 \
     "https://secure.tailvoy.test:443/" 2>&1 || true)
 if [ "$TLS_HTTP" = "200" ]; then
-    test_pass "TLS: GET / via passthrough"
+    test_pass "TLS: passthrough allow (cap grants L4 access)"
 else
-    test_fail "TLS: GET / via passthrough" "got $TLS_HTTP"
+    test_fail "TLS: passthrough allow (cap grants L4 access)" "got $TLS_HTTP"
 fi
 
 # Verify backend cert (not Envoy-terminated) — check CN
@@ -363,28 +370,32 @@ echo "  GRPCRoute TESTS"
 echo "========================================"
 
 if [ "$HAS_GRPCURL" = "true" ]; then
-    # Health check — should succeed (L7 rule allows /grpc.health.v1.Health/*)
+    # L7 (l7_policy: true) — ext_authz evaluates cap routes for gRPC paths.
+    # Cap grants allow /grpc.health.v1.Health/*
+
+    # Allowed: health check (path: /grpc.health.v1.Health/Check)
     GRPC_OUT=$(grpcurl -plaintext -max-time 10 "$IP:50051" grpc.health.v1.Health/Check 2>&1 || true)
     if echo "$GRPC_OUT" | grep -q "SERVING"; then
-        test_pass "gRPC: health check SERVING"
+        test_pass "gRPC: health check allow"
     else
-        test_fail "gRPC: health check SERVING" "got '$GRPC_OUT'"
+        test_fail "gRPC: health check allow" "got '$GRPC_OUT'"
     fi
 
-    # Named service health check
+    # Allowed: named service health check (same path prefix)
     GRPC_OUT2=$(grpcurl -plaintext -max-time 10 -d '{"service":"echo"}' "$IP:50051" grpc.health.v1.Health/Check 2>&1 || true)
     if echo "$GRPC_OUT2" | grep -q "SERVING"; then
-        test_pass "gRPC: named service health check"
+        test_pass "gRPC: named service health allow"
     else
-        test_fail "gRPC: named service health check" "got '$GRPC_OUT2'"
+        test_fail "gRPC: named service health allow" "got '$GRPC_OUT2'"
     fi
 
-    # Reflection — list services
-    GRPC_LIST=$(grpcurl -plaintext -max-time 10 "$IP:50051" list 2>&1 || true)
-    if echo "$GRPC_LIST" | grep -q "grpc.health.v1.Health"; then
-        test_pass "gRPC: reflection lists health service"
+    # Denied: reflection (path: /grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo)
+    # Not in cap grants — ext_authz should deny with PERMISSION_DENIED
+    GRPC_DENY=$(grpcurl -plaintext -max-time 10 "$IP:50051" list 2>&1 || true)
+    if echo "$GRPC_DENY" | grep -qi "PermissionDenied\|code = 7\|PERMISSION_DENIED"; then
+        test_pass "gRPC: reflection deny (not in cap grants)"
     else
-        test_fail "gRPC: reflection lists health service" "got '$GRPC_LIST'"
+        test_fail "gRPC: reflection deny (not in cap grants)" "got '$GRPC_DENY'"
     fi
 else
     echo "  SKIP: grpcurl not found, skipping gRPC tests"

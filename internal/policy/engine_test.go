@@ -7,198 +7,289 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// HasAccess
+// HasAccess — L4 gating
 // ---------------------------------------------------------------------------
 
-func TestHasAccess_WithRoutes(t *testing.T) {
+func TestHasAccess_EmptyRuleFullAccess(t *testing.T) {
 	e := NewEngine()
-	id := &Identity{
-		UserLogin:     "alice@example.com",
-		TailscaleIP:   "100.64.0.1",
-		AllowedRoutes: []string{"/api/*"},
-	}
-	if !e.HasAccess(id) {
-		t.Error("expected HasAccess=true when AllowedRoutes is non-empty")
+	id := &Identity{Rules: []CapRule{{}}} // empty rule = unrestricted
+	if !e.HasAccess("https", "app.example.com", id) {
+		t.Error("empty rule should grant full access")
 	}
 }
 
-func TestHasAccess_MultipleRoutes(t *testing.T) {
+func TestHasAccess_ListenerMatch(t *testing.T) {
 	e := NewEngine()
-	id := &Identity{
-		AllowedRoutes: []string{"/api/*", "/admin/*", "/health"},
-	}
-	if !e.HasAccess(id) {
-		t.Error("expected HasAccess=true with multiple routes")
+	id := &Identity{Rules: []CapRule{{Listeners: []string{"https"}}}}
+	if !e.HasAccess("https", "", id) {
+		t.Error("expected match for listener=https")
 	}
 }
 
-func TestHasAccess_NilRoutes(t *testing.T) {
+func TestHasAccess_ListenerMismatch(t *testing.T) {
 	e := NewEngine()
-	id := &Identity{
-		UserLogin:   "bob@example.com",
-		TailscaleIP: "100.64.0.2",
-	}
-	if e.HasAccess(id) {
-		t.Error("expected HasAccess=false when AllowedRoutes is nil")
+	id := &Identity{Rules: []CapRule{{Listeners: []string{"https"}}}}
+	if e.HasAccess("http", "", id) {
+		t.Error("expected deny for listener=http when rule requires https")
 	}
 }
 
-func TestHasAccess_EmptyRoutes(t *testing.T) {
+func TestHasAccess_HostnameExactMatch(t *testing.T) {
 	e := NewEngine()
-	id := &Identity{
-		AllowedRoutes: []string{},
-	}
-	if e.HasAccess(id) {
-		t.Error("expected HasAccess=false when AllowedRoutes is empty slice")
+	id := &Identity{Rules: []CapRule{{Hostnames: []string{"app.example.com"}}}}
+	if !e.HasAccess("https", "app.example.com", id) {
+		t.Error("expected hostname exact match")
 	}
 }
 
-func TestHasAccess_EmptyIdentity(t *testing.T) {
+func TestHasAccess_HostnameMismatch(t *testing.T) {
+	e := NewEngine()
+	id := &Identity{Rules: []CapRule{{Hostnames: []string{"app.example.com"}}}}
+	if e.HasAccess("https", "other.example.com", id) {
+		t.Error("expected deny for hostname mismatch")
+	}
+}
+
+func TestHasAccess_HostnameWildcard(t *testing.T) {
+	e := NewEngine()
+	id := &Identity{Rules: []CapRule{{Hostnames: []string{"*.example.com"}}}}
+
+	if !e.HasAccess("https", "app.example.com", id) {
+		t.Error("expected wildcard match for app.example.com")
+	}
+	if !e.HasAccess("https", "deep.sub.example.com", id) {
+		t.Error("expected wildcard match for deep.sub.example.com")
+	}
+	// Wildcard should NOT match the bare domain.
+	if e.HasAccess("https", "example.com", id) {
+		t.Error("*.example.com should not match example.com")
+	}
+}
+
+func TestHasAccess_ListenerAndHostnameAND(t *testing.T) {
+	e := NewEngine()
+	id := &Identity{Rules: []CapRule{{
+		Listeners: []string{"https"},
+		Hostnames: []string{"app.example.com"},
+	}}}
+
+	if !e.HasAccess("https", "app.example.com", id) {
+		t.Error("both dimensions match, should allow")
+	}
+	if e.HasAccess("http", "app.example.com", id) {
+		t.Error("listener mismatch, should deny")
+	}
+	if e.HasAccess("https", "other.example.com", id) {
+		t.Error("hostname mismatch, should deny")
+	}
+}
+
+func TestHasAccess_NoRulesDeny(t *testing.T) {
 	e := NewEngine()
 	id := &Identity{}
-	if e.HasAccess(id) {
-		t.Error("expected HasAccess=false for zero-value identity")
+	if e.HasAccess("https", "app.example.com", id) {
+		t.Error("no rules should deny access")
 	}
 }
 
-func TestHasAccess_WildcardRoute(t *testing.T) {
+func TestHasAccess_MultipleRulesOR(t *testing.T) {
 	e := NewEngine()
+	id := &Identity{Rules: []CapRule{
+		{Listeners: []string{"https"}, Hostnames: []string{"app.example.com"}},
+		{Listeners: []string{"grpc"}, Hostnames: []string{"api.example.com"}},
+	}}
+
+	if !e.HasAccess("https", "app.example.com", id) {
+		t.Error("first rule should match")
+	}
+	if !e.HasAccess("grpc", "api.example.com", id) {
+		t.Error("second rule should match")
+	}
+	if e.HasAccess("grpc", "app.example.com", id) {
+		t.Error("mixed dimensions should deny")
+	}
+}
+
+func TestHasAccess_PlainTCPWithHostnameRule(t *testing.T) {
+	e := NewEngine()
+	// Rule requires specific hostname, but SNI is empty (plain TCP).
+	id := &Identity{Rules: []CapRule{{Hostnames: []string{"app.example.com"}}}}
+	if e.HasAccess("https", "", id) {
+		t.Error("plain TCP (empty sni) with hostname rule should NOT match")
+	}
+}
+
+func TestHasAccess_EmptyIdentityDeny(t *testing.T) {
+	e := NewEngine()
+	if e.HasAccess("https", "app.example.com", nil) {
+		t.Error("nil identity should deny")
+	}
+	if e.HasAccess("https", "app.example.com", &Identity{}) {
+		t.Error("zero-value identity should deny")
+	}
+}
+
+func TestHasAccess_EmptyRuleNoSNI(t *testing.T) {
+	e := NewEngine()
+	// Empty rule = all dimensions unrestricted, including hostname.
+	id := &Identity{Rules: []CapRule{{}}}
+	if !e.HasAccess("tcp", "", id) {
+		t.Error("empty rule should match even with no SNI")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// CheckAccess — L7 gating
+// ---------------------------------------------------------------------------
+
+func TestCheckAccess_ListenerAndRoutes(t *testing.T) {
+	e := NewEngine()
+	id := &Identity{Rules: []CapRule{{
+		Listeners: []string{"https"},
+		Routes:    []string{"/api/*"},
+	}}}
+
+	if !e.CheckAccess("https", "app.example.com", "/api/v1/users", id) {
+		t.Error("listener+route match, should allow")
+	}
+	if e.CheckAccess("http", "app.example.com", "/api/v1/users", id) {
+		t.Error("listener mismatch, should deny")
+	}
+	if e.CheckAccess("https", "app.example.com", "/admin/settings", id) {
+		t.Error("route mismatch, should deny")
+	}
+}
+
+func TestCheckAccess_HostnameAndRoutes(t *testing.T) {
+	e := NewEngine()
+	id := &Identity{Rules: []CapRule{{
+		Hostnames: []string{"app.example.com"},
+		Routes:    []string{"/api/*"},
+	}}}
+
+	if !e.CheckAccess("https", "app.example.com", "/api/data", id) {
+		t.Error("hostname+route match, should allow")
+	}
+	if e.CheckAccess("https", "other.example.com", "/api/data", id) {
+		t.Error("hostname mismatch, should deny")
+	}
+}
+
+func TestCheckAccess_AllThreeDimensions(t *testing.T) {
+	e := NewEngine()
+	id := &Identity{Rules: []CapRule{{
+		Listeners: []string{"https"},
+		Hostnames: []string{"app.example.com"},
+		Routes:    []string{"/api/*"},
+	}}}
+
+	if !e.CheckAccess("https", "app.example.com", "/api/v1", id) {
+		t.Error("all three match, should allow")
+	}
+	if e.CheckAccess("http", "app.example.com", "/api/v1", id) {
+		t.Error("listener mismatch, should deny")
+	}
+	if e.CheckAccess("https", "other.example.com", "/api/v1", id) {
+		t.Error("hostname mismatch, should deny")
+	}
+	if e.CheckAccess("https", "app.example.com", "/admin", id) {
+		t.Error("route mismatch, should deny")
+	}
+}
+
+func TestCheckAccess_EmptyRuleFullAccess(t *testing.T) {
+	e := NewEngine()
+	id := &Identity{Rules: []CapRule{{}}}
+
+	paths := []string{"/", "/foo", "/foo/bar/baz", "/api/v1/data"}
+	for _, p := range paths {
+		if !e.CheckAccess("https", "anything.com", p, id) {
+			t.Errorf("empty rule should grant full access for path %q", p)
+		}
+	}
+}
+
+func TestCheckAccess_MultipleRulesOR(t *testing.T) {
+	e := NewEngine()
+	id := &Identity{Rules: []CapRule{
+		{Listeners: []string{"https"}, Routes: []string{"/api/*"}},
+		{Listeners: []string{"grpc"}, Routes: []string{"/rpc/*"}},
+	}}
+
+	if !e.CheckAccess("https", "", "/api/v1", id) {
+		t.Error("first rule should match")
+	}
+	if !e.CheckAccess("grpc", "", "/rpc/method", id) {
+		t.Error("second rule should match")
+	}
+	if e.CheckAccess("https", "", "/rpc/method", id) {
+		t.Error("cross-rule should deny")
+	}
+}
+
+func TestCheckAccess_NoRulesDeny(t *testing.T) {
+	e := NewEngine()
+	id := &Identity{}
+	if e.CheckAccess("https", "app.com", "/anything", id) {
+		t.Error("no rules should deny")
+	}
+}
+
+func TestCheckAccess_NilIdentity(t *testing.T) {
+	e := NewEngine()
+	if e.CheckAccess("https", "app.com", "/anything", nil) {
+		t.Error("nil identity should deny")
+	}
+}
+
+func TestCheckAccess_WildcardRoute(t *testing.T) {
+	e := NewEngine()
+	id := &Identity{Rules: []CapRule{{Routes: []string{"/*"}}}}
+
+	paths := []string{"/", "/foo", "/foo/bar/baz", "/api/v1/data"}
+	for _, p := range paths {
+		if !e.CheckAccess("https", "app.com", p, id) {
+			t.Errorf("wildcard route should match path %q", p)
+		}
+	}
+}
+
+func TestCheckAccess_MergedRoutes(t *testing.T) {
+	e := NewEngine()
+
+	// Simulates multiple cap rules from ACL grants.
 	id := &Identity{
-		AllowedRoutes: []string{"/*"},
+		UserLogin: "alice@company.com",
+		Rules: []CapRule{
+			{Routes: []string{"/api/*", "/admin/*"}},
+			{Routes: []string{"/health", "/metrics"}},
+		},
 	}
-	if !e.HasAccess(id) {
-		t.Error("expected HasAccess=true for wildcard route")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// CheckAccess
-// ---------------------------------------------------------------------------
-
-func TestCheckAccess_SingleRouteMatch(t *testing.T) {
-	e := NewEngine()
-	id := &Identity{AllowedRoutes: []string{"/api/*"}}
-
-	if !e.CheckAccess("/api/v1/users", id) {
-		t.Error("expected CheckAccess=true for /api/v1/users matching /api/*")
-	}
-	if e.CheckAccess("/admin/settings", id) {
-		t.Error("expected CheckAccess=false for /admin/settings not matching /api/*")
-	}
-}
-
-func TestCheckAccess_MultipleRoutes(t *testing.T) {
-	e := NewEngine()
-	id := &Identity{AllowedRoutes: []string{"/api/*", "/admin/*", "/health"}}
 
 	tests := []struct {
 		path string
 		want bool
 	}{
-		{"/api/data", true},
+		{"/api/v1/users", true},
+		{"/api/", true},
+		{"/api", true},
 		{"/admin/settings", true},
+		{"/admin/deep/nested/path", true},
 		{"/health", true},
-		{"/health/", false}, // exact match: no trailing slash
-		{"/unknown", false},
-		{"/", false},
+		{"/metrics", true},
+		{"/health/", false},   // exact, no trailing slash
+		{"/metrics/", false},  // exact, no trailing slash
+		{"/dashboard", false}, // not in any route
+		{"/", false},          // root not granted
+		{"/apiary", false},    // similar prefix, no match
+		{"/administrator", false},
 	}
 
 	for _, tt := range tests {
-		got := e.CheckAccess(tt.path, id)
+		got := e.CheckAccess("https", "", tt.path, id)
 		if got != tt.want {
 			t.Errorf("CheckAccess(%q) = %v, want %v", tt.path, got, tt.want)
 		}
-	}
-}
-
-func TestCheckAccess_WildcardOnly(t *testing.T) {
-	e := NewEngine()
-	id := &Identity{AllowedRoutes: []string{"/*"}}
-
-	paths := []string{"/", "/foo", "/foo/bar/baz", "/api/v1/data"}
-	for _, p := range paths {
-		if !e.CheckAccess(p, id) {
-			t.Errorf("expected CheckAccess(%q)=true for wildcard route /*", p)
-		}
-	}
-}
-
-func TestCheckAccess_NoRoutes(t *testing.T) {
-	e := NewEngine()
-	id := &Identity{}
-
-	if e.CheckAccess("/anything", id) {
-		t.Error("expected CheckAccess=false when identity has no routes")
-	}
-}
-
-func TestCheckAccess_EmptyRoutes(t *testing.T) {
-	e := NewEngine()
-	id := &Identity{AllowedRoutes: []string{}}
-
-	if e.CheckAccess("/anything", id) {
-		t.Error("expected CheckAccess=false when AllowedRoutes is empty")
-	}
-}
-
-func TestCheckAccess_ExactRouteMatch(t *testing.T) {
-	e := NewEngine()
-	id := &Identity{AllowedRoutes: []string{"/health"}}
-
-	if !e.CheckAccess("/health", id) {
-		t.Error("expected exact match for /health")
-	}
-	if e.CheckAccess("/healthz", id) {
-		t.Error("expected no match for /healthz against exact /health")
-	}
-	if e.CheckAccess("/health/", id) {
-		t.Error("expected no match for /health/ against exact /health")
-	}
-}
-
-func TestCheckAccess_PrefixDoesNotOvermatch(t *testing.T) {
-	e := NewEngine()
-	id := &Identity{AllowedRoutes: []string{"/admin/*"}}
-
-	if !e.CheckAccess("/admin/settings", id) {
-		t.Error("expected match for /admin/settings")
-	}
-	if e.CheckAccess("/admins", id) {
-		t.Error("/admin/* should not match /admins (different prefix)")
-	}
-}
-
-func TestCheckAccess_FirstMatchReturns(t *testing.T) {
-	e := NewEngine()
-	// If the first route already matches, we should return true
-	// regardless of later routes.
-	id := &Identity{AllowedRoutes: []string{"/*", "/restricted/*"}}
-
-	if !e.CheckAccess("/anything", id) {
-		t.Error("expected first wildcard route to match")
-	}
-}
-
-func TestCheckAccess_PathTraversal(t *testing.T) {
-	e := NewEngine()
-	id := &Identity{AllowedRoutes: []string{"/public/*"}}
-
-	// No path normalization: dot segments are literal.
-	if !e.CheckAccess("/public/../admin/secret", id) {
-		t.Error("expected literal match on /public/* for dot-segment path")
-	}
-	if e.CheckAccess("/admin/secret", id) {
-		t.Error("expected no match on /public/* for /admin/secret")
-	}
-}
-
-func TestCheckAccess_VeryLongPath(t *testing.T) {
-	e := NewEngine()
-	id := &Identity{AllowedRoutes: []string{"/*"}}
-
-	longPath := "/" + strings.Repeat("segment/", 500)
-	if !e.CheckAccess(longPath, id) {
-		t.Error("expected wildcard to match very long path")
 	}
 }
 
@@ -277,7 +368,7 @@ func TestMatchPath_EdgeCases(t *testing.T) {
 		{"/public/*", "/public/page?foo=bar", true},
 		{"/public/page", "/public/page?foo=bar", false},
 
-		// Empty path — "/*" is a catch-all.
+		// Empty path -- "/*" is a catch-all.
 		{"/*", "", true},
 		{"/", "", false},
 		{"", "", true},
@@ -311,57 +402,85 @@ func TestMatchPath_EdgeCases(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// matchHostname
+// ---------------------------------------------------------------------------
+
+func TestMatchHostname(t *testing.T) {
+	tests := []struct {
+		pattern  string
+		hostname string
+		want     bool
+	}{
+		{"app.example.com", "app.example.com", true},
+		{"app.example.com", "other.example.com", false},
+		{"*.example.com", "app.example.com", true},
+		{"*.example.com", "deep.sub.example.com", true},
+		{"*.example.com", "example.com", false},
+		{"*.example.com", "notexample.com", false},
+		{"*.com", "example.com", true},
+		{"*.com", "com", false},
+	}
+
+	for _, tt := range tests {
+		got := matchHostname(tt.pattern, tt.hostname)
+		if got != tt.want {
+			t.Errorf("matchHostname(%q, %q) = %v, want %v", tt.pattern, tt.hostname, got, tt.want)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Edge cases: identity variations
 // ---------------------------------------------------------------------------
 
-func TestCheckAccess_TaggedIdentityWithRoutes(t *testing.T) {
+func TestCheckAccess_TaggedIdentityWithRules(t *testing.T) {
 	e := NewEngine()
 	id := &Identity{
-		Tags:          []string{"tag:server"},
-		IsTagged:      true,
-		TailscaleIP:   "100.64.0.5",
-		AllowedRoutes: []string{"/api/*"},
+		Tags:        []string{"tag:server"},
+		IsTagged:    true,
+		TailscaleIP: "100.64.0.5",
+		Rules:       []CapRule{{Routes: []string{"/api/*"}}},
 	}
-	if !e.HasAccess(id) {
-		t.Error("tagged identity with routes should have access")
+	if !e.HasAccess("https", "", id) {
+		t.Error("tagged identity with rules should have access")
 	}
-	if !e.CheckAccess("/api/data", id) {
+	if !e.CheckAccess("https", "", "/api/data", id) {
 		t.Error("tagged identity should match /api/data")
 	}
 }
 
-func TestCheckAccess_TaggedIdentityWithoutRoutes(t *testing.T) {
+func TestCheckAccess_TaggedIdentityWithoutRules(t *testing.T) {
 	e := NewEngine()
 	id := &Identity{
 		Tags:        []string{"tag:server"},
 		IsTagged:    true,
 		TailscaleIP: "100.64.0.5",
 	}
-	if e.HasAccess(id) {
-		t.Error("tagged identity without routes should not have access")
+	if e.HasAccess("https", "", id) {
+		t.Error("tagged identity without rules should not have access")
 	}
-	if e.CheckAccess("/anything", id) {
-		t.Error("tagged identity without routes should fail CheckAccess")
+	if e.CheckAccess("https", "", "/anything", id) {
+		t.Error("tagged identity without rules should fail CheckAccess")
 	}
 }
 
 func TestCheckAccess_IdentityFieldsIgnored(t *testing.T) {
-	// The engine only cares about AllowedRoutes. UserLogin, Tags, etc. are
+	// The engine only cares about Rules. UserLogin, Tags, etc. are
 	// informational and do not affect the policy decision.
 	e := NewEngine()
 
-	withRoutes := &Identity{
-		UserLogin:     "",
-		NodeName:      "",
-		Tags:          nil,
-		TailscaleIP:   "",
-		AllowedRoutes: []string{"/*"},
+	withRules := &Identity{
+		UserLogin:   "",
+		NodeName:    "",
+		Tags:        nil,
+		TailscaleIP: "",
+		Rules:       []CapRule{{Routes: []string{"/*"}}},
 	}
-	if !e.HasAccess(withRoutes) {
-		t.Error("identity with only AllowedRoutes should have access")
+	if !e.HasAccess("https", "", withRules) {
+		t.Error("identity with only Rules should have access")
 	}
-	if !e.CheckAccess("/test", withRoutes) {
-		t.Error("identity with only AllowedRoutes should pass CheckAccess")
+	if !e.CheckAccess("https", "", "/test", withRules) {
+		t.Error("identity with only Rules should pass CheckAccess")
 	}
 }
 
@@ -377,11 +496,14 @@ func TestConcurrentAccess(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			id := &Identity{AllowedRoutes: []string{"/api/*", "/*"}}
+			id := &Identity{Rules: []CapRule{
+				{Routes: []string{"/api/*"}},
+				{Routes: []string{"/*"}},
+			}}
 			for j := 0; j < 500; j++ {
-				e.HasAccess(id)
-				e.CheckAccess("/api/data", id)
-				e.CheckAccess("/other", id)
+				e.HasAccess("https", "app.example.com", id)
+				e.CheckAccess("https", "app.example.com", "/api/data", id)
+				e.CheckAccess("https", "app.example.com", "/other", id)
 			}
 		}()
 	}
@@ -397,11 +519,10 @@ func TestConcurrentAccess_DifferentIdentities(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			// Each goroutine uses its own identity.
-			id := &Identity{AllowedRoutes: []string{"/api/*"}}
+			id := &Identity{Rules: []CapRule{{Routes: []string{"/api/*"}}}}
 			for j := 0; j < 200; j++ {
-				e.HasAccess(id)
-				e.CheckAccess("/api/v1", id)
+				e.HasAccess("https", "", id)
+				e.CheckAccess("https", "", "/api/v1", id)
 			}
 		}()
 	}
@@ -409,10 +530,10 @@ func TestConcurrentAccess_DifferentIdentities(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			id := &Identity{} // no routes
+			id := &Identity{} // no rules
 			for j := 0; j < 200; j++ {
-				e.HasAccess(id)
-				e.CheckAccess("/api/v1", id)
+				e.HasAccess("https", "", id)
+				e.CheckAccess("https", "", "/api/v1", id)
 			}
 		}()
 	}
@@ -427,51 +548,5 @@ func TestNewEngine(t *testing.T) {
 	e := NewEngine()
 	if e == nil {
 		t.Fatal("NewEngine() returned nil")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Table-driven CheckAccess with merged routes
-// ---------------------------------------------------------------------------
-
-func TestCheckAccess_MergedRoutes(t *testing.T) {
-	e := NewEngine()
-
-	// Simulates a peer whose caps were merged from multiple ACL grants,
-	// resulting in a combined set of allowed route patterns.
-	id := &Identity{
-		UserLogin: "alice@company.com",
-		AllowedRoutes: []string{
-			"/api/*",
-			"/admin/*",
-			"/health",
-			"/metrics",
-		},
-	}
-
-	tests := []struct {
-		path string
-		want bool
-	}{
-		{"/api/v1/users", true},
-		{"/api/", true},
-		{"/api", true},
-		{"/admin/settings", true},
-		{"/admin/deep/nested/path", true},
-		{"/health", true},
-		{"/metrics", true},
-		{"/health/", false},   // exact, no trailing slash
-		{"/metrics/", false},  // exact, no trailing slash
-		{"/dashboard", false}, // not in any route
-		{"/", false},          // root not granted
-		{"/apiary", false},    // similar prefix, no match
-		{"/administrator", false},
-	}
-
-	for _, tt := range tests {
-		got := e.CheckAccess(tt.path, id)
-		if got != tt.want {
-			t.Errorf("CheckAccess(%q) = %v, want %v (routes: %v)", tt.path, got, tt.want, id.AllowedRoutes)
-		}
 	}
 }

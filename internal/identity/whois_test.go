@@ -2,6 +2,7 @@ package identity
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -11,6 +12,8 @@ import (
 
 	"tailscale.com/client/tailscale/apitype"
 	"tailscale.com/tailcfg"
+
+	"github.com/rajsinghtech/tailvoy/internal/policy"
 )
 
 // mockClient implements WhoIsClient for tests.
@@ -433,5 +436,216 @@ func TestStripPort(t *testing.T) {
 	}
 	if got := StripPort("not-valid"); got != "not-valid" {
 		t.Errorf("StripPort invalid = %q, want passthrough", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Cap rule parsing (toIdentity)
+// ---------------------------------------------------------------------------
+
+// tailvoyCapMap builds a PeerCapMap from TailvoyCapRule values.
+func tailvoyCapMap(rules ...TailvoyCapRule) tailcfg.PeerCapMap {
+	var msgs []tailcfg.RawMessage
+	for _, r := range rules {
+		b, _ := json.Marshal(r)
+		msgs = append(msgs, tailcfg.RawMessage(b))
+	}
+	return tailcfg.PeerCapMap{CapTailvoy: msgs}
+}
+
+func TestToIdentity_MultiDimensionalCap(t *testing.T) {
+	mc := &mockClient{
+		resp: &apitype.WhoIsResponse{
+			Node: &tailcfg.Node{Name: "node.ts.net."},
+			UserProfile: &tailcfg.UserProfile{
+				LoginName: "alice@example.com",
+			},
+			CapMap: tailvoyCapMap(TailvoyCapRule{
+				Listeners: []string{"https"},
+				Routes:    []string{"/api/*"},
+				Hostnames: []string{"app.example.com"},
+			}),
+		},
+	}
+
+	r := NewResolver(mc)
+	id, err := r.Resolve(context.Background(), "100.64.20.1:443")
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+
+	if len(id.Rules) != 1 {
+		t.Fatalf("expected 1 rule, got %d", len(id.Rules))
+	}
+	rule := id.Rules[0]
+	if len(rule.Listeners) != 1 || rule.Listeners[0] != "https" {
+		t.Errorf("Listeners = %v, want [https]", rule.Listeners)
+	}
+	if len(rule.Routes) != 1 || rule.Routes[0] != "/api/*" {
+		t.Errorf("Routes = %v, want [/api/*]", rule.Routes)
+	}
+	if len(rule.Hostnames) != 1 || rule.Hostnames[0] != "app.example.com" {
+		t.Errorf("Hostnames = %v, want [app.example.com]", rule.Hostnames)
+	}
+}
+
+func TestToIdentity_EmptyCapRule(t *testing.T) {
+	mc := &mockClient{
+		resp: &apitype.WhoIsResponse{
+			Node: &tailcfg.Node{Name: "node.ts.net."},
+			UserProfile: &tailcfg.UserProfile{
+				LoginName: "alice@example.com",
+			},
+			CapMap: tailvoyCapMap(TailvoyCapRule{}),
+		},
+	}
+
+	r := NewResolver(mc)
+	id, err := r.Resolve(context.Background(), "100.64.20.2:443")
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+
+	// Empty cap rule {} should produce one rule with all dimensions empty
+	// (unrestricted).
+	if len(id.Rules) != 1 {
+		t.Fatalf("expected 1 rule, got %d", len(id.Rules))
+	}
+	rule := id.Rules[0]
+	if len(rule.Listeners) != 0 || len(rule.Routes) != 0 || len(rule.Hostnames) != 0 {
+		t.Errorf("empty cap rule should produce empty CapRule, got %+v", rule)
+	}
+}
+
+func TestToIdentity_MultipleCapRules(t *testing.T) {
+	mc := &mockClient{
+		resp: &apitype.WhoIsResponse{
+			Node: &tailcfg.Node{Name: "node.ts.net."},
+			UserProfile: &tailcfg.UserProfile{
+				LoginName: "alice@example.com",
+			},
+			CapMap: tailvoyCapMap(
+				TailvoyCapRule{
+					Listeners: []string{"https"},
+					Routes:    []string{"/api/*"},
+				},
+				TailvoyCapRule{
+					Listeners: []string{"grpc"},
+					Hostnames: []string{"*.internal.com"},
+				},
+			),
+		},
+	}
+
+	r := NewResolver(mc)
+	id, err := r.Resolve(context.Background(), "100.64.20.3:443")
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+
+	if len(id.Rules) != 2 {
+		t.Fatalf("expected 2 rules, got %d", len(id.Rules))
+	}
+
+	want := []policy.CapRule{
+		{Listeners: []string{"https"}, Routes: []string{"/api/*"}},
+		{Listeners: []string{"grpc"}, Hostnames: []string{"*.internal.com"}},
+	}
+	for i, r := range id.Rules {
+		w := want[i]
+		if fmt.Sprintf("%v", r.Listeners) != fmt.Sprintf("%v", w.Listeners) {
+			t.Errorf("rule[%d].Listeners = %v, want %v", i, r.Listeners, w.Listeners)
+		}
+		if fmt.Sprintf("%v", r.Routes) != fmt.Sprintf("%v", w.Routes) {
+			t.Errorf("rule[%d].Routes = %v, want %v", i, r.Routes, w.Routes)
+		}
+		if fmt.Sprintf("%v", r.Hostnames) != fmt.Sprintf("%v", w.Hostnames) {
+			t.Errorf("rule[%d].Hostnames = %v, want %v", i, r.Hostnames, w.Hostnames)
+		}
+	}
+}
+
+func TestToIdentity_HostnamesOnly(t *testing.T) {
+	mc := &mockClient{
+		resp: &apitype.WhoIsResponse{
+			Node: &tailcfg.Node{Name: "node.ts.net."},
+			UserProfile: &tailcfg.UserProfile{
+				LoginName: "alice@example.com",
+			},
+			CapMap: tailvoyCapMap(TailvoyCapRule{
+				Hostnames: []string{"app.example.com", "*.internal.com"},
+			}),
+		},
+	}
+
+	r := NewResolver(mc)
+	id, err := r.Resolve(context.Background(), "100.64.20.4:443")
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+
+	if len(id.Rules) != 1 {
+		t.Fatalf("expected 1 rule, got %d", len(id.Rules))
+	}
+	rule := id.Rules[0]
+	if len(rule.Hostnames) != 2 {
+		t.Errorf("expected 2 hostnames, got %v", rule.Hostnames)
+	}
+	if rule.Hostnames[0] != "app.example.com" || rule.Hostnames[1] != "*.internal.com" {
+		t.Errorf("Hostnames = %v", rule.Hostnames)
+	}
+}
+
+func TestToIdentity_NoCap(t *testing.T) {
+	mc := &mockClient{
+		resp: &apitype.WhoIsResponse{
+			Node: &tailcfg.Node{Name: "node.ts.net."},
+			UserProfile: &tailcfg.UserProfile{
+				LoginName: "bob@example.com",
+			},
+			// No CapMap -- peer on tailnet but no tailvoy grant.
+		},
+	}
+
+	r := NewResolver(mc)
+	id, err := r.Resolve(context.Background(), "100.64.20.5:443")
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+
+	if len(id.Rules) != 0 {
+		t.Errorf("expected 0 rules for peer without cap, got %d", len(id.Rules))
+	}
+}
+
+func TestToIdentity_RoutesOnlyCap(t *testing.T) {
+	// Backwards-compatible: old-style cap with only routes.
+	mc := &mockClient{
+		resp: &apitype.WhoIsResponse{
+			Node: &tailcfg.Node{Name: "node.ts.net."},
+			UserProfile: &tailcfg.UserProfile{
+				LoginName: "alice@example.com",
+			},
+			CapMap: tailvoyCapMap(TailvoyCapRule{
+				Routes: []string{"/api/*", "/health"},
+			}),
+		},
+	}
+
+	r := NewResolver(mc)
+	id, err := r.Resolve(context.Background(), "100.64.20.6:443")
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+
+	if len(id.Rules) != 1 {
+		t.Fatalf("expected 1 rule, got %d", len(id.Rules))
+	}
+	rule := id.Rules[0]
+	if len(rule.Routes) != 2 || rule.Routes[0] != "/api/*" || rule.Routes[1] != "/health" {
+		t.Errorf("Routes = %v, want [/api/* /health]", rule.Routes)
+	}
+	if len(rule.Listeners) != 0 || len(rule.Hostnames) != 0 {
+		t.Errorf("expected empty listeners/hostnames, got L=%v H=%v", rule.Listeners, rule.Hostnames)
 	}
 }

@@ -1,24 +1,77 @@
 name: Integration Tests
 
 on:
+  push:
+    branches: [main]
+  pull_request:
   workflow_dispatch:
-    inputs:
-      test_type:
-        description: "Test type to run"
-        required: true
-        default: "kind"
-        type: choice
-        options:
-          - kind
-          - docker-compose
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  id-token: write
+  contents: read
+
 jobs:
-  kind:
-    if: false # disabled until TS_AUTHKEY secret is configured
+  setup-tailnet:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      tailnet_name: ${{ steps.create.outputs.tailnet_name }}
+      ts_authkey: ${{ steps.authkey.outputs.ts_authkey }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Get OIDC token
+        id: oidc
+        run: |
+          JWT=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api.tailscale.com/${{ secrets.TS_OAUTH_CLIENT_ID }}" \
+            | jq -r '.value')
+          echo "::add-mask::$JWT"
+          echo "jwt=$JWT" >> "$GITHUB_OUTPUT"
+
+      - name: Exchange OIDC token for access token
+        id: token
+        run: |
+          ACCESS_TOKEN=$(./integration_test/scripts/exchange-oidc-token.sh \
+            "${{ secrets.TS_OAUTH_CLIENT_ID }}" \
+            "${{ steps.oidc.outputs.jwt }}")
+          echo "::add-mask::$ACCESS_TOKEN"
+          echo "access_token=$ACCESS_TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: Create ephemeral tailnet
+        id: create
+        run: |
+          TAILNET_NAME="tailvoy-ci-${{ github.run_id }}"
+          ./integration_test/scripts/create-tailnet.sh \
+            "${{ steps.token.outputs.access_token }}" \
+            "$TAILNET_NAME"
+          echo "tailnet_name=$TAILNET_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Apply test ACL
+        run: |
+          ./integration_test/scripts/update-acl.sh \
+            "${{ steps.token.outputs.access_token }}" \
+            "${{ steps.create.outputs.tailnet_name }}" \
+            ./integration_test/scripts/test-acl.json
+
+      - name: Create auth key
+        id: authkey
+        run: |
+          AUTHKEY_JSON=$(./integration_test/scripts/create-auth-key.sh \
+            "${{ steps.token.outputs.access_token }}" \
+            "${{ steps.create.outputs.tailnet_name }}" \
+            "kind" true true)
+          TS_AUTHKEY=$(echo "$AUTHKEY_JSON" | jq -r '.key')
+          echo "::add-mask::$TS_AUTHKEY"
+          echo "ts_authkey=$TS_AUTHKEY" >> "$GITHUB_OUTPUT"
+
+  kind-test:
+    needs: setup-tailnet
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -48,13 +101,15 @@ jobs:
         run: sudo apt-get install -y ncat
 
       - name: Install Tailscale
-        uses: tailscale/github-action@v3
+        uses: tailscale/github-action@v4
         with:
-          authkey: ${{ secrets.TS_AUTHKEY }}
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          audience: api.tailscale.com/${{ secrets.TS_OAUTH_CLIENT_ID }}
+          tags: tag:kind
 
       - name: Run kind integration tests
         env:
-          TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
+          TS_AUTHKEY: ${{ needs.setup-tailnet.outputs.ts_authkey }}
         run: make kind-test
 
       - name: Collect logs on failure
@@ -73,39 +128,36 @@ jobs:
             eg-controller.log
           retention-days: 7
 
-  docker-compose:
-    if: inputs.test_type == 'docker-compose'
+  cleanup-tailnet:
+    if: always()
+    needs: setup-tailnet
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 5
 
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Tailscale
-        uses: tailscale/github-action@v3
-        with:
-          authkey: ${{ secrets.TS_AUTHKEY }}
-
-      - name: Build images
-        run: docker compose -f integration_test/docker-compose-full.yaml build
-
-      - name: Run integration tests
-        env:
-          TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
-        run: make integration-test
-
-      - name: Collect logs on failure
-        if: failure()
+      - name: Get OIDC token
+        id: oidc
         run: |
-          docker compose -f integration_test/docker-compose-full.yaml logs tailvoy > tailvoy.log 2>&1 || true
-          docker compose -f integration_test/docker-compose-full.yaml logs backend > backend.log 2>&1 || true
+          JWT=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api.tailscale.com/${{ secrets.TS_OAUTH_CLIENT_ID }}" \
+            | jq -r '.value')
+          echo "::add-mask::$JWT"
+          echo "jwt=$JWT" >> "$GITHUB_OUTPUT"
 
-      - name: Upload logs
-        if: failure()
-        uses: actions/upload-artifact@v7
-        with:
-          name: integration-test-logs
-          path: |
-            tailvoy.log
-            backend.log
-          retention-days: 7
+      - name: Exchange OIDC token for access token
+        id: token
+        run: |
+          ACCESS_TOKEN=$(./integration_test/scripts/exchange-oidc-token.sh \
+            "${{ secrets.TS_OAUTH_CLIENT_ID }}" \
+            "${{ steps.oidc.outputs.jwt }}")
+          echo "::add-mask::$ACCESS_TOKEN"
+          echo "access_token=$ACCESS_TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: Delete ephemeral tailnet
+        continue-on-error: true
+        run: |
+          ./integration_test/scripts/delete-tailnet.sh \
+            "${{ steps.token.outputs.access_token }}" \
+            "${{ needs.setup-tailnet.outputs.tailnet_name }}"

@@ -1,10 +1,11 @@
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
-  name: backend-route
+  name: http-route
 spec:
   parentRefs:
     - name: eg
+      sectionName: http
   rules:
     - matches:
         - path:
@@ -13,3 +14,72 @@ spec:
       backendRefs:
         - name: backend
           port: 8080
+---
+apiVersion: gateway.networking.k8s.io/v1alpha2
+kind: TCPRoute
+metadata:
+  name: tcp-route
+spec:
+  parentRefs:
+    - name: eg
+      sectionName: tcp
+  rules:
+    - backendRefs:
+        - name: tcp-echo
+          port: 9000
+---
+apiVersion: gateway.networking.k8s.io/v1alpha2
+kind: UDPRoute
+metadata:
+  name: udp-route
+spec:
+  parentRefs:
+    - name: eg
+      sectionName: udp
+  rules:
+    - backendRefs:
+        - name: udp-echo
+          port: 9053
+---
+apiVersion: gateway.networking.k8s.io/v1alpha2
+kind: TLSRoute
+metadata:
+  name: tls-route
+spec:
+  parentRefs:
+    - name: eg
+      sectionName: tls
+  hostnames:
+    - secure.tailvoy.test
+  rules:
+    - backendRefs:
+        - name: tls-backend
+          port: 8443
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: GRPCRoute
+metadata:
+  name: grpc-route
+spec:
+  parentRefs:
+    - name: eg
+      sectionName: grpc
+  rules:
+    - matches:
+        - method:
+            service: grpc.health.v1.Health
+      backendRefs:
+        - name: grpc-echo
+          port: 50051
+    - matches:
+        - method:
+            service: grpc.reflection.v1.ServerReflection
+      backendRefs:
+        - name: grpc-echo
+          port: 50051
+    - matches:
+        - method:
+            service: grpc.reflection.v1alpha.ServerReflection
+      backendRefs:
+        - name: grpc-echo
+          port: 50051

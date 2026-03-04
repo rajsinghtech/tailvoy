@@ -1,0 +1,47 @@
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata:
+  name: tailvoy-proxy
+  namespace: envoy-gateway-system
+spec:
+  provider:
+    type: Kubernetes
+    kubernetes:
+      envoyDeployment:
+        container:
+          image: "tailvoy:test"
+        patch:
+          type: StrategicMerge
+          value:
+            spec:
+              template:
+                spec:
+                  containers:
+                    - name: envoy
+                      command:
+                        - tailvoy
+                        - --policy
+                        - /etc/tailvoy/policy.yaml
+                        - --authz-addr
+                        - 0.0.0.0:9001
+                        - --log-level
+                        - debug
+                        - --
+                      env:
+                        - name: TS_AUTHKEY
+                          valueFrom:
+                            secretKeyRef:
+                              name: tailvoy-authkey
+                              key: TS_AUTHKEY
+                      ports:
+                        - containerPort: 9001
+                          name: authz
+                          protocol: TCP
+                      volumeMounts:
+                        - name: tailvoy-policy
+                          mountPath: /etc/tailvoy
+                          readOnly: true
+                  volumes:
+                    - name: tailvoy-policy
+                      configMap:
+                        name: tailvoy-policy

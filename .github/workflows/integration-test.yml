@@ -2,18 +2,89 @@ name: Integration Tests
 
 on:
   workflow_dispatch:
+    inputs:
+      test_type:
+        description: "Test type to run"
+        required: true
+        default: "kind"
+        type: choice
+        options:
+          - kind
+          - docker-compose
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  integration:
+  kind:
+    if: inputs.test_type == 'kind'
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install kind
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      - name: Install grpcurl
+        run: |
+          curl -sSL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_amd64.tar.gz \
+            | sudo tar -xz -C /usr/local/bin grpcurl
+
+      - name: Install ncat
+        run: sudo apt-get install -y ncat
+
+      - name: Install Tailscale
+        uses: tailscale/github-action@v3
+        with:
+          authkey: ${{ secrets.TS_AUTHKEY }}
+
+      - name: Run kind integration tests
+        env:
+          TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
+        run: make kind-test
+
+      - name: Collect logs on failure
+        if: failure()
+        run: |
+          kubectl logs -n envoy-gateway-system -l gateway.envoyproxy.io/owning-gateway-name=eg --tail=200 > tailvoy-data-plane.log 2>&1 || true
+          kubectl logs -n envoy-gateway-system -l control-plane=envoy-gateway --tail=100 > eg-controller.log 2>&1 || true
+
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kind-test-logs
+          path: |
+            tailvoy-data-plane.log
+            eg-controller.log
+          retention-days: 7
+
+  docker-compose:
+    if: inputs.test_type == 'docker-compose'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Tailscale
+        uses: tailscale/github-action@v3
+        with:
+          authkey: ${{ secrets.TS_AUTHKEY }}
 
       - name: Build images
         run: docker compose -f integration_test/docker-compose-full.yaml build

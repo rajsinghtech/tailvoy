@@ -4,6 +4,11 @@ metadata:
   name: eg
 spec:
   controllerName: gateway.envoyproxy.io/gatewayclass-controller
+  parametersRef:
+    group: gateway.envoyproxy.io
+    kind: EnvoyProxy
+    name: tailvoy-proxy
+    namespace: envoy-gateway-system
 ---
 apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
@@ -15,14 +20,41 @@ spec:
     - name: http
       protocol: HTTP
       port: 8080
+    - name: tcp
+      protocol: TCP
+      port: 8090
+    - name: udp
+      protocol: UDP
+      port: 8053
+    - name: grpc
+      protocol: HTTP
+      port: 8081
+    - name: tls
+      protocol: TLS
+      port: 8443
+      tls:
+        mode: Passthrough
 ---
 apiVersion: gateway.envoyproxy.io/v1alpha1
 kind: ClientTrafficPolicy
 metadata:
   name: enable-proxy-protocol
 spec:
-  targetRef:
-    group: gateway.networking.k8s.io
-    kind: Gateway
-    name: eg
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: eg
+      sectionName: http
+  enableProxyProtocol: true
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: ClientTrafficPolicy
+metadata:
+  name: enable-proxy-protocol-grpc
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: eg
+      sectionName: grpc
   enableProxyProtocol: true

@@ -8,7 +8,7 @@ BUILD_DATE?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 
 LDFLAGS   := -s -w
 
-.PHONY: build test lint cover clean docker-build integration-test
+.PHONY: build test lint cover clean docker-build integration-test kind-test
 
 build:
 	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/tailvoy/
@@ -34,3 +34,6 @@ docker-build:
 
 integration-test:
 	cd integration_test && ./run-full-tests.sh
+
+kind-test:
+	./integration_test/kind/run-kind-tests.sh

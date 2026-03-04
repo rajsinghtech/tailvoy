@@ -5,9 +5,9 @@ Tailscale identity-aware firewall for Envoy. tailvoy joins your tailnet, identif
 ```
 Tailnet Client (100.x.x.x)
         │
-   tsnet Listener ── L4 policy (port/identity gating)
+   tsnet Listener ── L4 policy (identity gating per listener)
         │
-    L4 Proxy ── PROXY protocol v2 (optional)
+   TCP/UDP Proxy ── PROXY protocol v2 (preserves client IP)
         │
       Envoy ── L7 policy via ext_authz (path, host, method)
         │
@@ -16,9 +16,22 @@ Tailnet Client (100.x.x.x)
 
 ## How it works
 
-tailvoy embeds [tsnet](https://pkg.go.dev/tailscale.com/tsnet) to join the tailnet directly — no sidecar Tailscale daemon needed. Every inbound connection triggers a WhoIs lookup to resolve the caller's Tailscale identity (user, tags, node). L4 rules gate connections at the listener level. For HTTP traffic, tailvoy runs an [ext_authz](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_authz_filter) server that Envoy consults on every request, enabling path/host/method-level policies.
+tailvoy embeds [tsnet](https://pkg.go.dev/tailscale.com/tsnet) to join the tailnet directly — no sidecar Tailscale daemon needed. Every inbound connection triggers a WhoIs lookup to resolve the caller's Tailscale identity (user, tags, node). L4 rules gate connections at the listener level. For HTTP/gRPC traffic, tailvoy runs an [ext_authz](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_authz_filter) server that Envoy consults on every request, enabling path/host/method-level policies.
 
-tailvoy manages Envoy as a subprocess. In standalone mode (`-standalone`), it auto-generates the Envoy bootstrap config from your policy file so you don't need to write Envoy YAML at all.
+tailvoy supports two deployment modes:
+
+- **Standalone** (`-standalone`): tailvoy auto-generates Envoy bootstrap config and manages Envoy as a subprocess. No Envoy YAML needed.
+- **Envoy Gateway data plane**: tailvoy replaces the default Envoy image via the `EnvoyProxy` CRD, acting as the data plane for [Envoy Gateway](https://gateway.envoyproxy.io/). EG manages routing via xDS while tailvoy handles Tailscale ingress and identity-based policy.
+
+## Supported protocols
+
+| Protocol | Listener | Policy |
+|----------|----------|--------|
+| TCP | `protocol: tcp` | L4 identity check |
+| UDP | `protocol: udp` | L4 identity check |
+| HTTP | TCP listener with `l7_policy: true` | L4 + L7 ext_authz (path/host/method) |
+| gRPC | TCP listener with `l7_policy: true` | L4 + L7 ext_authz (service/method path) |
+| TLS passthrough | TCP listener (no `l7_policy`) | L4 identity check only |
 
 ## Install
 
@@ -38,9 +51,56 @@ Requires Go 1.25+.
 
 ## Usage
 
+### Standalone mode
+
 ```sh
 tailvoy -policy policy.yaml -standalone
 ```
+
+### Envoy Gateway data plane
+
+Deploy tailvoy as the EG data plane via the `EnvoyProxy` CRD:
+
+```yaml
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata:
+  name: tailvoy-proxy
+  namespace: envoy-gateway-system
+spec:
+  provider:
+    type: Kubernetes
+    kubernetes:
+      envoyDeployment:
+        container:
+          image: "ghcr.io/rajsinghtech/tailvoy:latest"
+        patch:
+          type: StrategicMerge
+          value:
+            spec:
+              template:
+                spec:
+                  containers:
+                    - name: envoy
+                      command: ["tailvoy", "--policy", "/etc/tailvoy/policy.yaml",
+                                "--authz-addr", "0.0.0.0:9001", "--"]
+                      env:
+                        - name: TS_AUTHKEY
+                          valueFrom:
+                            secretKeyRef:
+                              name: tailvoy-authkey
+                              key: TS_AUTHKEY
+                      volumeMounts:
+                        - name: tailvoy-policy
+                          mountPath: /etc/tailvoy
+                          readOnly: true
+                  volumes:
+                    - name: tailvoy-policy
+                      configMap:
+                        name: tailvoy-policy
+```
+
+EG's generated Envoy args are appended after `--` automatically.
 
 ### Flags
 
@@ -80,6 +140,11 @@ listeners:
     proxy_protocol: v2
     l7_policy: true
 
+  - name: dns
+    protocol: udp
+    listen: ":53"
+    forward: "127.0.0.1:1053"
+
   - name: metrics
     protocol: tcp
     listen: ":9090"
@@ -88,6 +153,11 @@ listeners:
 l4_rules:
   - match:
       listener: https
+    allow:
+      any_tailscale: true
+
+  - match:
+      listener: dns
     allow:
       any_tailscale: true
 
@@ -120,6 +190,17 @@ l7_rules:
 default: deny
 ```
 
+### Listener options
+
+| Field | Description |
+|-------|-------------|
+| `name` | Listener identifier, referenced by rules |
+| `protocol` | `tcp` or `udp` |
+| `listen` | Address to bind (e.g. `:443`) |
+| `forward` | Backend address to proxy to |
+| `proxy_protocol` | Set to `v2` to prepend a PROXY protocol v2 header. Preserves the caller's Tailscale IP so Envoy and your backend see the real client address. |
+| `l7_policy` | Set to `true` to route through Envoy with ext_authz for HTTP-level rules. When `false`, the listener is L4-only (pure TCP/UDP forwarding after identity check). |
+
 ### Policy reference
 
 **Identity matchers** (used in `allow` blocks):
@@ -141,7 +222,8 @@ default: deny
 make test              # unit tests with race detector
 make lint              # golangci-lint
 make cover             # coverage report
-make integration-test  # full integration tests (requires TS_AUTHKEY)
+make integration-test  # docker compose integration tests (requires TS_AUTHKEY)
+make kind-test         # kind cluster integration tests (requires TS_AUTHKEY)
 make docker-build      # build container image
 ```
 

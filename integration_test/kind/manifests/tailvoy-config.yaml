@@ -1,0 +1,126 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tailvoy-policy
+  namespace: envoy-gateway-system
+data:
+  policy.yaml: |
+    tailscale:
+      hostname: "tailvoy-kind-test"
+      authkey: "${TS_AUTHKEY}"
+      ephemeral: true
+    listeners:
+      - name: default
+        protocol: tcp
+        listen: ":80"
+        forward: "127.0.0.1:8080"
+        proxy_protocol: v2
+        l7_policy: true
+      - name: tcp
+        protocol: tcp
+        listen: ":5432"
+        forward: "127.0.0.1:8090"
+        l7_policy: false
+      - name: udp
+        protocol: udp
+        listen: ":9053"
+        forward: "127.0.0.1:8053"
+        l7_policy: false
+      - name: grpc
+        protocol: tcp
+        listen: ":50051"
+        forward: "127.0.0.1:8081"
+        proxy_protocol: v2
+        l7_policy: true
+      - name: tls
+        protocol: tcp
+        listen: ":443"
+        forward: "127.0.0.1:8443"
+        l7_policy: false
+    l4_rules:
+      - match:
+          listener: default
+        allow:
+          any_tailscale: true
+      - match:
+          listener: tcp
+        allow:
+          any_tailscale: true
+      - match:
+          listener: udp
+        allow:
+          any_tailscale: true
+      - match:
+          listener: grpc
+        allow:
+          any_tailscale: true
+      - match:
+          listener: tls
+        allow:
+          any_tailscale: true
+    l7_rules:
+      - match:
+          listener: default
+          path: "/admin/*"
+        allow:
+          tags: ["tag:admin-only"]
+      - match:
+          listener: default
+          path: "/public/*"
+        allow:
+          any_tailscale: true
+      - match:
+          listener: default
+          path: "/grpc.health.v1.Health/*"
+        allow:
+          any_tailscale: true
+      - match:
+          listener: default
+          path: "/grpc.reflection.v1.ServerReflection/*"
+        allow:
+          any_tailscale: true
+      - match:
+          listener: default
+          path: "/grpc.reflection.v1alpha.ServerReflection/*"
+        allow:
+          any_tailscale: true
+      - match:
+          listener: default
+          path: "/health"
+        allow:
+          any_tailscale: true
+      - match:
+          listener: default
+          path: "/"
+        allow:
+          any_tailscale: true
+    default: deny
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tailvoy-authz
+  namespace: envoy-gateway-system
+spec:
+  selector:
+    gateway.envoyproxy.io/owning-gateway-name: eg
+    gateway.envoyproxy.io/owning-gateway-namespace: default
+  ports:
+    - port: 9001
+      targetPort: 9001
+      protocol: TCP
+---
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: allow-securitypolicy-to-authz
+  namespace: envoy-gateway-system
+spec:
+  from:
+    - group: gateway.envoyproxy.io
+      kind: SecurityPolicy
+      namespace: default
+  to:
+    - group: ""
+      kind: Service
+      name: tailvoy-authz

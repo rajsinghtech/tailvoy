@@ -86,6 +86,7 @@ func run(args []string) error {
 	engine := policy.NewEngine(cfg)
 	resolver := identity.NewResolver(lc)
 	l4proxy := proxy.NewL4Proxy(logger)
+	udpProxy := proxy.NewUDPProxy(logger)
 	listenerMgr := proxy.NewListenerManager(engine, resolver, l4proxy, logger)
 	authzServer := authz.NewServer(engine, resolver, logger)
 
@@ -101,24 +102,55 @@ func run(args []string) error {
 	}()
 	logger.Info("ext_authz server starting", "addr", *authzAddr)
 
+	// Get the tailscale IPv4 for UDP listeners (ListenPacket requires an IP).
+	ip4, _ := ts.TailscaleIPs()
+	var tsIP string
+	if ip4.IsValid() {
+		tsIP = ip4.String()
+	}
+
 	// Start tsnet listeners for each configured listener.
 	for i := range cfg.Listeners {
 		l := &cfg.Listeners[i]
-		ln, err := ts.Listen("tcp", l.Listen)
-		if err != nil {
-			cancel()
-			wg.Wait()
-			return fmt.Errorf("listen %s (%s): %w", l.Name, l.Listen, err)
-		}
-		logger.Info("listener started", "name", l.Name, "addr", l.Listen)
-
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if err := listenerMgr.Serve(ctx, ln, l); err != nil {
-				logger.Error("listener error", "name", l.Name, "err", err)
+		switch l.Protocol {
+		case "udp":
+			if tsIP == "" {
+				cancel()
+				wg.Wait()
+				return fmt.Errorf("no tailscale IPv4 for UDP listener %s", l.Name)
 			}
-		}()
+			pc, err := ts.ListenPacket("udp", fmt.Sprintf("%s:%s", tsIP, l.Port()))
+			if err != nil {
+				cancel()
+				wg.Wait()
+				return fmt.Errorf("listen udp %s (%s): %w", l.Name, l.Listen, err)
+			}
+			logger.Info("udp listener started", "name", l.Name, "addr", l.Listen)
+
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if err := udpProxy.Serve(ctx, pc, l.Forward, resolver, engine, l.Name); err != nil {
+					logger.Error("udp listener error", "name", l.Name, "err", err)
+				}
+			}()
+		default: // tcp
+			ln, err := ts.Listen("tcp", l.Listen)
+			if err != nil {
+				cancel()
+				wg.Wait()
+				return fmt.Errorf("listen %s (%s): %w", l.Name, l.Listen, err)
+			}
+			logger.Info("listener started", "name", l.Name, "addr", l.Listen)
+
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if err := listenerMgr.Serve(ctx, ln, l); err != nil {
+					logger.Error("listener error", "name", l.Name, "err", err)
+				}
+			}()
+		}
 	}
 
 	// Standalone mode: generate envoy bootstrap config from policy.

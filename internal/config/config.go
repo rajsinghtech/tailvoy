@@ -105,6 +105,12 @@ func (c *Config) validate() error {
 		if l.Forward == "" {
 			return fmt.Errorf("listeners[%d].forward is required", i)
 		}
+		switch l.Protocol {
+		case "tcp", "udp":
+			// valid
+		default:
+			return fmt.Errorf("listeners[%d].protocol must be \"tcp\" or \"udp\", got %q", i, l.Protocol)
+		}
 		switch l.ProxyProtocol {
 		case "", "v2":
 			// valid

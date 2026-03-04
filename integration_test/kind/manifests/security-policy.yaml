@@ -3,20 +3,24 @@ kind: SecurityPolicy
 metadata:
   name: ext-authz
 spec:
-  targetRef:
-    group: gateway.networking.k8s.io
-    kind: HTTPRoute
-    name: backend-route
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: http-route
+    - group: gateway.networking.k8s.io
+      kind: GRPCRoute
+      name: grpc-route
   extAuth:
+    headersToExtAuth:
+      - x-forwarded-for
+      - x-envoy-external-address
+      - x-envoy-original-path
+      - host
     http:
       backendRefs:
         - name: tailvoy-authz
+          namespace: envoy-gateway-system
           port: 9001
-      headersToExtAuth:
-        - x-forwarded-for
-        - x-envoy-external-address
-        - x-envoy-original-path
-        - host
       headersToBackend:
         - x-tailscale-user
         - x-tailscale-node

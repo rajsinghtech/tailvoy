@@ -1,3 +1,4 @@
+# HTTP echo backend
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -29,3 +30,137 @@ spec:
   ports:
     - port: 8080
       targetPort: 8080
+---
+# TCP echo backend
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tcp-echo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tcp-echo
+  template:
+    metadata:
+      labels:
+        app: tcp-echo
+    spec:
+      containers:
+        - name: tcp-echo
+          image: tailvoy-tcp-echo:test
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 9000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tcp-echo
+spec:
+  selector:
+    app: tcp-echo
+  ports:
+    - port: 9000
+      targetPort: 9000
+---
+# UDP echo backend
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: udp-echo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: udp-echo
+  template:
+    metadata:
+      labels:
+        app: udp-echo
+    spec:
+      containers:
+        - name: udp-echo
+          image: tailvoy-udp-echo:test
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 9053
+              protocol: UDP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: udp-echo
+spec:
+  selector:
+    app: udp-echo
+  ports:
+    - port: 9053
+      targetPort: 9053
+      protocol: UDP
+---
+# TLS echo backend
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tls-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tls-backend
+  template:
+    metadata:
+      labels:
+        app: tls-backend
+    spec:
+      containers:
+        - name: tls-backend
+          image: tailvoy-tls-backend:test
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8443
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tls-backend
+spec:
+  selector:
+    app: tls-backend
+  ports:
+    - port: 8443
+      targetPort: 8443
+---
+# gRPC echo backend (health check service)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grpc-echo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grpc-echo
+  template:
+    metadata:
+      labels:
+        app: grpc-echo
+    spec:
+      containers:
+        - name: grpc-echo
+          image: tailvoy-grpc-echo:test
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 50051
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grpc-echo
+spec:
+  selector:
+    app: grpc-echo
+  ports:
+    - port: 50051
+      targetPort: 50051

@@ -21,6 +21,8 @@ jobs:
     outputs:
       tailnet_name: ${{ steps.create.outputs.tailnet_name }}
       ts_authkey: ${{ steps.authkey.outputs.ts_authkey }}
+      oauth_client_id: ${{ steps.create.outputs.oauth_client_id }}
+      oauth_client_secret: ${{ steps.create.outputs.oauth_client_secret }}
 
     steps:
       - uses: actions/checkout@v6
@@ -65,7 +67,6 @@ jobs:
             exit 1
           fi
 
-          echo "::add-mask::$OAUTH_CLIENT_SECRET"
           echo "tailnet_name=$TAILNET_NAME" >> "$GITHUB_OUTPUT"
           echo "oauth_client_id=$OAUTH_CLIENT_ID" >> "$GITHUB_OUTPUT"
           echo "oauth_client_secret=$OAUTH_CLIENT_SECRET" >> "$GITHUB_OUTPUT"
@@ -76,7 +77,6 @@ jobs:
           TAILNET_TOKEN=$(./integration_test/scripts/get-access-token.sh \
             "${{ steps.create.outputs.oauth_client_id }}" \
             "${{ steps.create.outputs.oauth_client_secret }}")
-          echo "::add-mask::$TAILNET_TOKEN"
           echo "tailnet_token=$TAILNET_TOKEN" >> "$GITHUB_OUTPUT"
 
       - name: Apply test ACL
@@ -161,27 +161,17 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Get OIDC token
-        id: oidc
+      - name: Get tailnet-scoped access token
+        id: tailnet_token
         run: |
-          JWT=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api.tailscale.com/TbqNGJkY5611CNTRL-kz4CwX2LK721CNTRL" \
-            | jq -r '.value')
-          echo "::add-mask::$JWT"
-          echo "jwt=$JWT" >> "$GITHUB_OUTPUT"
-
-      - name: Exchange OIDC token for access token
-        id: token
-        run: |
-          ACCESS_TOKEN=$(./integration_test/scripts/exchange-oidc-token.sh \
-            "TbqNGJkY5611CNTRL-kz4CwX2LK721CNTRL" \
-            "${{ steps.oidc.outputs.jwt }}")
-          echo "::add-mask::$ACCESS_TOKEN"
-          echo "access_token=$ACCESS_TOKEN" >> "$GITHUB_OUTPUT"
+          TAILNET_TOKEN=$(./integration_test/scripts/get-access-token.sh \
+            "${{ needs.setup-tailnet.outputs.oauth_client_id }}" \
+            "${{ needs.setup-tailnet.outputs.oauth_client_secret }}")
+          echo "tailnet_token=$TAILNET_TOKEN" >> "$GITHUB_OUTPUT"
 
       - name: Delete ephemeral tailnet
         continue-on-error: true
         run: |
           ./integration_test/scripts/delete-tailnet.sh \
-            "${{ steps.token.outputs.access_token }}" \
+            "${{ steps.tailnet_token.outputs.tailnet_token }}" \
             "${{ needs.setup-tailnet.outputs.tailnet_name }}"

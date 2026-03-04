@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -122,6 +123,295 @@ func TestListenerManagerAllowAndForward(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Serve did not return in time")
+	}
+}
+
+func TestListenerManagerRapidConnectDisconnect(t *testing.T) {
+	backend := startEchoServer(t)
+
+	cfg := &config.Config{
+		Tailscale: config.TailscaleConfig{Hostname: "test"},
+		Listeners: []config.Listener{{
+			Name: "rapid", Protocol: "tcp", Listen: ":9990", Forward: backend.Addr().String(),
+		}},
+		L4Rules: []config.Rule{{
+			Match: config.RuleMatch{Listener: "rapid"},
+			Allow: config.AllowSpec{AnyTailscale: true},
+		}},
+		Default: "deny",
+	}
+	listenerCfg := cfg.ListenerByName("rapid")
+
+	whois := &mockWhoIs{
+		responses: map[string]*apitype.WhoIsResponse{
+			"127.0.0.1": {
+				Node:        &tailcfg.Node{Name: "node.ts.net."},
+				UserProfile: &tailcfg.UserProfile{LoginName: "user@example.com"},
+			},
+		},
+	}
+
+	engine := policy.NewEngine(cfg)
+	resolver := identity.NewResolver(whois)
+	l4proxy := NewL4Proxy(slog.Default())
+	lm := NewListenerManager(engine, resolver, l4proxy, slog.Default())
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go lm.Serve(ctx, ln, listenerCfg)
+
+	// Rapidly connect and disconnect 20 times.
+	for i := 0; i < 20; i++ {
+		conn, err := net.DialTimeout("tcp", ln.Addr().String(), 2*time.Second)
+		if err != nil {
+			t.Fatalf("dial %d: %v", i, err)
+		}
+		conn.Close()
+	}
+
+	// Give the server a moment to process all disconnects.
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+}
+
+func TestListenerManagerConcurrentConnections(t *testing.T) {
+	backend := startEchoServer(t)
+
+	cfg := &config.Config{
+		Tailscale: config.TailscaleConfig{Hostname: "test"},
+		Listeners: []config.Listener{{
+			Name: "concurrent", Protocol: "tcp", Listen: ":9991", Forward: backend.Addr().String(),
+		}},
+		L4Rules: []config.Rule{{
+			Match: config.RuleMatch{Listener: "concurrent"},
+			Allow: config.AllowSpec{AnyTailscale: true},
+		}},
+		Default: "deny",
+	}
+	listenerCfg := cfg.ListenerByName("concurrent")
+
+	whois := &mockWhoIs{
+		responses: map[string]*apitype.WhoIsResponse{
+			"127.0.0.1": {
+				Node:        &tailcfg.Node{Name: "node.ts.net."},
+				UserProfile: &tailcfg.UserProfile{LoginName: "user@example.com"},
+			},
+		},
+	}
+
+	engine := policy.NewEngine(cfg)
+	resolver := identity.NewResolver(whois)
+	l4proxy := NewL4Proxy(slog.Default())
+	lm := NewListenerManager(engine, resolver, l4proxy, slog.Default())
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go lm.Serve(ctx, ln, listenerCfg)
+
+	const numConns = 10
+	var wg sync.WaitGroup
+	wg.Add(numConns)
+
+	for i := 0; i < numConns; i++ {
+		go func(idx int) {
+			defer wg.Done()
+
+			conn, err := net.DialTimeout("tcp", ln.Addr().String(), 2*time.Second)
+			if err != nil {
+				t.Errorf("conn %d: dial: %v", idx, err)
+				return
+			}
+			defer conn.Close()
+
+			msg := fmt.Sprintf("hello-%d", idx)
+			if _, err := conn.Write([]byte(msg)); err != nil {
+				t.Errorf("conn %d: write: %v", idx, err)
+				return
+			}
+
+			buf := make([]byte, len(msg))
+			conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+			if _, err := io.ReadFull(conn, buf); err != nil {
+				t.Errorf("conn %d: read: %v", idx, err)
+				return
+			}
+
+			if string(buf) != msg {
+				t.Errorf("conn %d: got %q, want %q", idx, buf, msg)
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	cancel()
+}
+
+// slowWhoIs implements identity.WhoIsClient with an artificial delay.
+type slowWhoIs struct {
+	delay     time.Duration
+	responses map[string]*apitype.WhoIsResponse
+}
+
+func (m *slowWhoIs) WhoIs(ctx context.Context, addr string) (*apitype.WhoIsResponse, error) {
+	select {
+	case <-time.After(m.delay):
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	ip := identity.StripPort(addr)
+	if resp, ok := m.responses[ip]; ok {
+		return resp, nil
+	}
+	return nil, fmt.Errorf("not found: %s", ip)
+}
+
+func TestListenerManagerSlowIdentityResolution(t *testing.T) {
+	backend := startEchoServer(t)
+
+	cfg := &config.Config{
+		Tailscale: config.TailscaleConfig{Hostname: "test"},
+		Listeners: []config.Listener{{
+			Name: "slow", Protocol: "tcp", Listen: ":9992", Forward: backend.Addr().String(),
+		}},
+		L4Rules: []config.Rule{{
+			Match: config.RuleMatch{Listener: "slow"},
+			Allow: config.AllowSpec{AnyTailscale: true},
+		}},
+		Default: "deny",
+	}
+	listenerCfg := cfg.ListenerByName("slow")
+
+	whois := &slowWhoIs{
+		delay: 500 * time.Millisecond,
+		responses: map[string]*apitype.WhoIsResponse{
+			"127.0.0.1": {
+				Node:        &tailcfg.Node{Name: "node.ts.net."},
+				UserProfile: &tailcfg.UserProfile{LoginName: "user@example.com"},
+			},
+		},
+	}
+
+	engine := policy.NewEngine(cfg)
+	resolver := identity.NewResolver(whois)
+	l4proxy := NewL4Proxy(slog.Default())
+	lm := NewListenerManager(engine, resolver, l4proxy, slog.Default())
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go lm.Serve(ctx, ln, listenerCfg)
+
+	conn, err := net.DialTimeout("tcp", ln.Addr().String(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	payload := []byte("after-slow-resolve")
+	if _, err := conn.Write(payload); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	buf := make([]byte, len(payload))
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+
+	if string(buf) != string(payload) {
+		t.Fatalf("echo mismatch: got %q, want %q", buf, payload)
+	}
+
+	conn.Close()
+	cancel()
+}
+
+func TestListenerManagerContextCancellationDuringServe(t *testing.T) {
+	backend := startEchoServer(t)
+
+	cfg := &config.Config{
+		Tailscale: config.TailscaleConfig{Hostname: "test"},
+		Listeners: []config.Listener{{
+			Name: "canceltest", Protocol: "tcp", Listen: ":9993", Forward: backend.Addr().String(),
+		}},
+		L4Rules: []config.Rule{{
+			Match: config.RuleMatch{Listener: "canceltest"},
+			Allow: config.AllowSpec{AnyTailscale: true},
+		}},
+		Default: "deny",
+	}
+	listenerCfg := cfg.ListenerByName("canceltest")
+
+	whois := &mockWhoIs{
+		responses: map[string]*apitype.WhoIsResponse{
+			"127.0.0.1": {
+				Node:        &tailcfg.Node{Name: "node.ts.net."},
+				UserProfile: &tailcfg.UserProfile{LoginName: "user@example.com"},
+			},
+		},
+	}
+
+	engine := policy.NewEngine(cfg)
+	resolver := identity.NewResolver(whois)
+	l4proxy := NewL4Proxy(slog.Default())
+	lm := NewListenerManager(engine, resolver, l4proxy, slog.Default())
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- lm.Serve(ctx, ln, listenerCfg)
+	}()
+
+	// Establish a connection that is actively forwarding.
+	conn, err := net.DialTimeout("tcp", ln.Addr().String(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	payload := []byte("pre-cancel")
+	if _, err := conn.Write(payload); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	buf := make([]byte, len(payload))
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+
+	// Cancel context while connection is in flight.
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err != nil && err != context.Canceled {
+			t.Fatalf("Serve returned unexpected error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Serve did not return in time after cancellation")
 	}
 }
 

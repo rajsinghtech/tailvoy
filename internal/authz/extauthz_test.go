@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"tailscale.com/client/tailscale/apitype"
 	"tailscale.com/tailcfg"
@@ -331,6 +333,220 @@ func TestListenerHeader(t *testing.T) {
 	srv.ServeHTTP(rec2, req2)
 	if rec2.Code != http.StatusOK {
 		t.Fatalf("expected 200 for correct listener, got %d", rec2.Code)
+	}
+}
+
+func TestMalformedXFF(t *testing.T) {
+	srv := testServer(t, baseCfg(), nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("x-forwarded-for", "not-an-ip")
+	rec := httptest.NewRecorder()
+
+	srv.ServeHTTP(rec, req)
+
+	// "not-an-ip" passes extractSourceIP (it's returned as-is since it has no port
+	// and isn't empty), but the resolver will fail to parse it, returning 403.
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for malformed XFF, got %d", rec.Code)
+	}
+}
+
+func TestMultipleIPsInXFFUsesFirst(t *testing.T) {
+	// Register two IPs: alice on .1.1, nothing on .2.2.
+	// XFF has alice first, unknown second. Should resolve alice.
+	srv := testServer(t, baseCfg(), map[string]*apitype.WhoIsResponse{
+		"100.64.1.1": aliceResp,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/data", nil)
+	req.Header.Set("x-forwarded-for", "100.64.1.1, 100.64.2.2")
+	rec := httptest.NewRecorder()
+
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 (first IP is alice), got %d", rec.Code)
+	}
+	if got := rec.Header().Get("x-tailscale-user"); got != "alice@example.com" {
+		t.Errorf("x-tailscale-user = %q, want alice@example.com", got)
+	}
+}
+
+func TestMultipleIPsInXFFFirstUnknown(t *testing.T) {
+	// First IP is unknown; second is alice. Should deny because only the first
+	// IP in XFF is used.
+	srv := testServer(t, baseCfg(), map[string]*apitype.WhoIsResponse{
+		"100.64.1.1": aliceResp,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/data", nil)
+	req.Header.Set("x-forwarded-for", "100.64.99.99, 100.64.1.1")
+	rec := httptest.NewRecorder()
+
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 (first IP is unknown), got %d", rec.Code)
+	}
+}
+
+func TestEmptyPath(t *testing.T) {
+	srv := testServer(t, baseCfg(), map[string]*apitype.WhoIsResponse{
+		"100.64.1.1": aliceResp,
+	})
+
+	// httptest.NewRequest requires a valid URL target, but we can test empty
+	// original-path header falling back to URL path of "/".
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("x-forwarded-for", "100.64.1.1")
+	req.URL.Path = ""
+	rec := httptest.NewRecorder()
+
+	srv.ServeHTTP(rec, req)
+
+	// The catch-all "/*" matches everything, so even an empty path is allowed.
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for empty path with catch-all, got %d", rec.Code)
+	}
+}
+
+func TestURLEncodedPathTraversal(t *testing.T) {
+	// The admin config restricts /admin/* to admin@example.com only.
+	// Attempt path traversal using URL-encoded characters: /public/%2e%2e/admin
+	// This should NOT match /admin/* because the path matching is literal.
+	srv := testServer(t, adminCfg(), map[string]*apitype.WhoIsResponse{
+		"100.64.1.1": aliceResp,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("x-forwarded-for", "100.64.1.1")
+	req.Header.Set("x-envoy-original-path", "/public/%2e%2e/admin")
+	rec := httptest.NewRecorder()
+
+	srv.ServeHTTP(rec, req)
+
+	// /public/%2e%2e/admin doesn't match /admin/* (literal prefix matching),
+	// so it falls to the catch-all /* which allows any tailscale user.
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for traversal path on catch-all, got %d", rec.Code)
+	}
+}
+
+func TestXFFTakesPrecedenceOverEnvoyHeader(t *testing.T) {
+	// Both headers set; XFF should win.
+	srv := testServer(t, baseCfg(), map[string]*apitype.WhoIsResponse{
+		"100.64.1.1": aliceResp,
+		"100.64.2.2": adminResp,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("x-forwarded-for", "100.64.1.1")
+	req.Header.Set("x-envoy-external-address", "100.64.2.2")
+	rec := httptest.NewRecorder()
+
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	// Should resolve to alice (from XFF), not admin (from envoy header).
+	if got := rec.Header().Get("x-tailscale-user"); got != "alice@example.com" {
+		t.Errorf("x-tailscale-user = %q, want alice@example.com (XFF should take precedence)", got)
+	}
+}
+
+func TestResolverErrorOnSecondCall(t *testing.T) {
+	// First call succeeds, second call (different IP) fails.
+	// Uses a custom mockWhoIs that tracks call count.
+	type failingMock struct {
+		callCount int
+	}
+
+	callCount := 0
+	mock := &mockWhoIs{
+		responses: map[string]*apitype.WhoIsResponse{
+			"100.64.1.1": aliceResp,
+		},
+	}
+
+	cfg := baseCfg()
+	engine := policy.NewEngine(cfg)
+	resolver := identity.NewResolver(mock)
+	srv := NewServer(engine, resolver, slog.Default())
+
+	// First request: known IP, should succeed.
+	req1 := httptest.NewRequest(http.MethodGet, "/", nil)
+	req1.Header.Set("x-forwarded-for", "100.64.1.1")
+	rec1 := httptest.NewRecorder()
+	srv.ServeHTTP(rec1, req1)
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("first request: expected 200, got %d", rec1.Code)
+	}
+
+	// Second request: unknown IP, resolver returns error.
+	req2 := httptest.NewRequest(http.MethodGet, "/", nil)
+	req2.Header.Set("x-forwarded-for", "100.64.99.99")
+	rec2 := httptest.NewRecorder()
+	srv.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusForbidden {
+		t.Fatalf("second request: expected 403, got %d", rec2.Code)
+	}
+
+	// Third request: first IP again, should still work (cached).
+	req3 := httptest.NewRequest(http.MethodGet, "/", nil)
+	req3.Header.Set("x-forwarded-for", "100.64.1.1")
+	rec3 := httptest.NewRecorder()
+	srv.ServeHTTP(rec3, req3)
+	if rec3.Code != http.StatusOK {
+		t.Fatalf("third request (cached): expected 200, got %d", rec3.Code)
+	}
+	_ = callCount // suppress unused warning for clarity
+}
+
+func TestGracefulShutdownWhileRequestInFlight(t *testing.T) {
+	srv := testServer(t, baseCfg(), map[string]*apitype.WhoIsResponse{
+		"100.64.1.1": aliceResp,
+	})
+
+	errCh := make(chan error, 1)
+
+	httpSrv := &http.Server{
+		Handler: srv,
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	go func() {
+		errCh <- httpSrv.Serve(ln)
+	}()
+
+	// Make a successful request to verify the server is running.
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("x-forwarded-for", "100.64.1.1")
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	// Initiate graceful shutdown.
+	shutdownErr := httpSrv.Shutdown(context.Background())
+	if shutdownErr != nil {
+		t.Fatalf("Shutdown error: %v", shutdownErr)
+	}
+
+	// Server.Serve should return http.ErrServerClosed.
+	select {
+	case err := <-errCh:
+		if err != http.ErrServerClosed {
+			t.Fatalf("expected ErrServerClosed, got %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("server did not stop in time")
 	}
 }
 

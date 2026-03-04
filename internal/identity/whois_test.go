@@ -3,7 +3,9 @@ package identity
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/netip"
+	"sync"
 	"testing"
 	"time"
 
@@ -233,6 +235,192 @@ func TestResolveInvalidAddr(t *testing.T) {
 	_, err := r.Resolve(context.Background(), "garbage")
 	if err == nil {
 		t.Fatal("expected error for invalid addr")
+	}
+}
+
+// atomicMockClient is a thread-safe WhoIsClient for concurrent tests.
+type atomicMockClient struct {
+	resp  *apitype.WhoIsResponse
+	err   error
+	mu    sync.Mutex
+	calls int
+}
+
+func (m *atomicMockClient) WhoIs(_ context.Context, _ string) (*apitype.WhoIsResponse, error) {
+	m.mu.Lock()
+	m.calls++
+	m.mu.Unlock()
+	return m.resp, m.err
+}
+
+func (m *atomicMockClient) CallCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.calls
+}
+
+func TestConcurrentResolveSameIP(t *testing.T) {
+	mc := &atomicMockClient{
+		resp: &apitype.WhoIsResponse{
+			Node: &tailcfg.Node{Name: "node.ts.net."},
+			UserProfile: &tailcfg.UserProfile{
+				LoginName: "concurrent@example.com",
+			},
+		},
+	}
+
+	r := NewResolver(mc)
+
+	const goroutines = 20
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+
+	errs := make(chan error, goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			id, err := r.Resolve(context.Background(), "100.64.1.1:12345")
+			if err != nil {
+				errs <- err
+				return
+			}
+			if id.UserLogin != "concurrent@example.com" {
+				errs <- fmt.Errorf("unexpected UserLogin: %q", id.UserLogin)
+			}
+		}()
+	}
+
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		t.Error(err)
+	}
+
+	// The mock client should have been called at least once. Due to races, it may
+	// be called more than once but should not be called goroutines times since
+	// the cache should serve most requests.
+	if mc.CallCount() == 0 {
+		t.Fatal("expected at least 1 WhoIs call")
+	}
+}
+
+func TestCacheManyEntries(t *testing.T) {
+	mc := &mockClient{
+		resp: &apitype.WhoIsResponse{
+			Node: &tailcfg.Node{Name: "node.ts.net."},
+			UserProfile: &tailcfg.UserProfile{
+				LoginName: "many@example.com",
+			},
+		},
+	}
+
+	r := NewResolver(mc)
+
+	// Populate cache with 100 distinct IPs.
+	for i := 0; i < 100; i++ {
+		addr := fmt.Sprintf("100.64.%d.%d:80", i/256, i%256)
+		_, err := r.Resolve(context.Background(), addr)
+		if err != nil {
+			t.Fatalf("resolve %s: %v", addr, err)
+		}
+	}
+
+	if mc.calls != 100 {
+		t.Fatalf("expected 100 WhoIs calls, got %d", mc.calls)
+	}
+
+	// All entries should be cached now. Resolving them again should not
+	// increase call count.
+	for i := 0; i < 100; i++ {
+		addr := fmt.Sprintf("100.64.%d.%d:80", i/256, i%256)
+		_, err := r.Resolve(context.Background(), addr)
+		if err != nil {
+			t.Fatalf("re-resolve %s: %v", addr, err)
+		}
+	}
+
+	if mc.calls != 100 {
+		t.Fatalf("expected still 100 WhoIs calls after cache hits, got %d", mc.calls)
+	}
+}
+
+func TestResolveIPv6Address(t *testing.T) {
+	mc := &mockClient{
+		resp: &apitype.WhoIsResponse{
+			Node: &tailcfg.Node{Name: "v6node.ts.net."},
+			UserProfile: &tailcfg.UserProfile{
+				LoginName: "ipv6@example.com",
+			},
+		},
+	}
+
+	r := NewResolver(mc)
+
+	// IPv6 with port.
+	id, err := r.Resolve(context.Background(), "[fd7a:115c:a1e0::1]:443")
+	if err != nil {
+		t.Fatalf("resolve IPv6 with port: %v", err)
+	}
+	if id.TailscaleIP != "fd7a:115c:a1e0::1" {
+		t.Errorf("TailscaleIP = %q, want fd7a:115c:a1e0::1", id.TailscaleIP)
+	}
+	if id.UserLogin != "ipv6@example.com" {
+		t.Errorf("UserLogin = %q, want ipv6@example.com", id.UserLogin)
+	}
+	if id.NodeName != "v6node.ts.net" {
+		t.Errorf("NodeName = %q, want v6node.ts.net", id.NodeName)
+	}
+
+	// Bare IPv6 (no port).
+	mc.calls = 0
+	id2, err := r.Resolve(context.Background(), "fd7a:115c:a1e0::1")
+	if err != nil {
+		t.Fatalf("resolve bare IPv6: %v", err)
+	}
+	// Should be served from cache since it's the same IP.
+	if mc.calls != 0 {
+		t.Errorf("expected 0 additional WhoIs calls (cached), got %d", mc.calls)
+	}
+	if id2.TailscaleIP != "fd7a:115c:a1e0::1" {
+		t.Errorf("bare IPv6 TailscaleIP = %q", id2.TailscaleIP)
+	}
+}
+
+func TestResolveAddressNoPort(t *testing.T) {
+	mc := &mockClient{
+		resp: &apitype.WhoIsResponse{
+			Node: &tailcfg.Node{Name: "noport.ts.net."},
+			UserProfile: &tailcfg.UserProfile{
+				LoginName: "noport@example.com",
+			},
+		},
+	}
+
+	r := NewResolver(mc)
+
+	// Bare IPv4 address without port.
+	id, err := r.Resolve(context.Background(), "100.64.5.5")
+	if err != nil {
+		t.Fatalf("resolve bare IP: %v", err)
+	}
+	if id.TailscaleIP != "100.64.5.5" {
+		t.Errorf("TailscaleIP = %q, want 100.64.5.5", id.TailscaleIP)
+	}
+	if id.UserLogin != "noport@example.com" {
+		t.Errorf("UserLogin = %q, want noport@example.com", id.UserLogin)
+	}
+	if mc.calls != 1 {
+		t.Errorf("expected 1 WhoIs call, got %d", mc.calls)
+	}
+
+	// Resolving the same IP with a port should use cache.
+	_, err = r.Resolve(context.Background(), "100.64.5.5:8080")
+	if err != nil {
+		t.Fatalf("resolve with port: %v", err)
+	}
+	if mc.calls != 1 {
+		t.Errorf("expected 1 WhoIs call (cached), got %d", mc.calls)
 	}
 }
 

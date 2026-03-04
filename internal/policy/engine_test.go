@@ -1,7 +1,11 @@
 package policy
 
 import (
+	"fmt"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/rajsinghtech/tailvoy/internal/config"
 )
@@ -298,4 +302,488 @@ func TestMatchesAllow_Groups(t *testing.T) {
 	if matchesAllow(allow, other) {
 		t.Error("expected no group match")
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Path matching edge cases
+// ---------------------------------------------------------------------------
+
+func TestMatchPath_EdgeCases(t *testing.T) {
+	tests := []struct {
+		pattern string
+		path    string
+		want    bool
+	}{
+		// Root exact match.
+		{"/", "/", true},
+		{"/", "", false},
+
+		// Trailing slash differences.
+		{"/admin", "/admin/", false},
+		{"/admin", "/admin", true},
+		{"/admin/", "/admin/", true},
+		{"/admin/", "/admin", false},
+
+		// Double slashes are treated literally — no normalization.
+		{"/admin/*", "//admin", false},
+		{"//admin/*", "//admin/foo", true},
+
+		// Dot segments are not resolved — passed through literally.
+		{"/admin/*", "/public/../admin/secret", false},
+		{"/public/*", "/public/../admin/secret", true},
+
+		// Query strings are part of the path string as received.
+		{"/public/*", "/public/page?foo=bar", true},
+		{"/public/page", "/public/page?foo=bar", false},
+
+		// Empty path — "/*" is a catch-all (returns true unconditionally).
+		{"/*", "", true},
+		{"/", "", false},
+		{"", "", true},
+
+		// Very long path — should not panic or hang.
+		{"/*", "/" + strings.Repeat("a", 1500), true},
+		{"/prefix/*", "/prefix/" + strings.Repeat("x/", 500), true},
+
+		// URL-encoded characters are literal — no decoding.
+		{"/public/*", "/public/hello%20world", true},
+		{"/public/hello world", "/public/hello%20world", false},
+
+		// Catch-all wildcard matches everything.
+		{"/*", "/a/b/c/d/e/f/g", true},
+		{"/*", "/", true},
+
+		// Deep prefix wildcard matches arbitrary depth.
+		{"/a/b/*", "/a/b/c/d/e", true},
+		{"/a/b/*", "/a/b/", true},
+		{"/a/b/*", "/a/b", true},
+		{"/a/b/*", "/a/bc", false},
+		{"/a/b/*", "/a/", false},
+	}
+
+	for _, tt := range tests {
+		got := matchPath(tt.pattern, tt.path)
+		if got != tt.want {
+			t.Errorf("matchPath(%q, %q) = %v, want %v", tt.pattern, tt.path, got, tt.want)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// CheckL4 edge cases
+// ---------------------------------------------------------------------------
+
+func TestCheckL4_EmptyIdentity(t *testing.T) {
+	cfg := testConfig(
+		[]config.Rule{{
+			Match: config.RuleMatch{Listener: "web"},
+			Allow: config.AllowSpec{Users: []string{"someone@company.com"}},
+		}},
+		nil, "deny",
+	)
+	e := NewEngine(cfg)
+
+	// Identity with no user, no tags, no node.
+	empty := &Identity{}
+	if e.CheckL4("web", empty) {
+		t.Error("expected deny for empty identity")
+	}
+}
+
+func TestCheckL4_ManyTags(t *testing.T) {
+	tags := make([]string, 150)
+	for i := range tags {
+		tags[i] = fmt.Sprintf("tag:noise-%d", i)
+	}
+	// Put the matching tag at the end.
+	tags = append(tags, "tag:target")
+
+	cfg := testConfig(
+		[]config.Rule{{
+			Match: config.RuleMatch{Listener: "db"},
+			Allow: config.AllowSpec{Tags: []string{"tag:target"}},
+		}},
+		nil, "deny",
+	)
+	e := NewEngine(cfg)
+
+	id := &Identity{Tags: tags, IsTagged: true}
+	if !e.CheckL4("db", id) {
+		t.Error("expected allow when matching tag is present among 150+ tags")
+	}
+
+	// Same many tags but without the target.
+	noMatch := &Identity{Tags: tags[:150], IsTagged: true}
+	if e.CheckL4("db", noMatch) {
+		t.Error("expected deny when target tag missing from 150 tags")
+	}
+}
+
+func TestCheckL4_EmptyAllowSpec(t *testing.T) {
+	cfg := testConfig(
+		[]config.Rule{{
+			Match: config.RuleMatch{Listener: "web"},
+			Allow: config.AllowSpec{}, // no users, no tags, no groups, any_tailscale=false
+		}},
+		nil, "deny",
+	)
+	e := NewEngine(cfg)
+
+	id := &Identity{UserLogin: "anyone@example.com", Tags: []string{"tag:foo"}, TailscaleIP: "100.64.0.1"}
+	if e.CheckL4("web", id) {
+		t.Error("expected deny for empty allow spec (nothing matches)")
+	}
+}
+
+func TestCheckL4_AnyTailscaleFalse(t *testing.T) {
+	cfg := testConfig(
+		[]config.Rule{{
+			Match: config.RuleMatch{Listener: "web"},
+			Allow: config.AllowSpec{AnyTailscale: false},
+		}},
+		nil, "deny",
+	)
+	e := NewEngine(cfg)
+
+	id := &Identity{UserLogin: "user@example.com", TailscaleIP: "100.64.0.1"}
+	if e.CheckL4("web", id) {
+		t.Error("any_tailscale=false should not match anything extra")
+	}
+}
+
+func TestCheckL4_TagCaseSensitivity(t *testing.T) {
+	cfg := testConfig(
+		[]config.Rule{{
+			Match: config.RuleMatch{Listener: "db"},
+			Allow: config.AllowSpec{Tags: []string{"tag:admin"}},
+		}},
+		nil, "deny",
+	)
+	e := NewEngine(cfg)
+
+	// Tags are case-sensitive (unlike users).
+	exact := &Identity{Tags: []string{"tag:admin"}, IsTagged: true}
+	if !e.CheckL4("db", exact) {
+		t.Error("expected allow for exact tag match")
+	}
+
+	wrongCase := &Identity{Tags: []string{"Tag:Admin"}, IsTagged: true}
+	if e.CheckL4("db", wrongCase) {
+		t.Error("expected deny: tags should be case-sensitive")
+	}
+
+	upperCase := &Identity{Tags: []string{"TAG:ADMIN"}, IsTagged: true}
+	if e.CheckL4("db", upperCase) {
+		t.Error("expected deny: tags should be case-sensitive")
+	}
+}
+
+func TestCheckL4_UserCaseSensitivity(t *testing.T) {
+	cfg := testConfig(
+		[]config.Rule{{
+			Match: config.RuleMatch{Listener: "web"},
+			Allow: config.AllowSpec{Users: []string{"Alice@Company.com"}},
+		}},
+		nil, "deny",
+	)
+	e := NewEngine(cfg)
+
+	tests := []struct {
+		login string
+		want  bool
+	}{
+		{"Alice@Company.com", true},
+		{"alice@company.com", true},
+		{"ALICE@COMPANY.COM", true},
+		{"aLiCe@cOmPaNy.CoM", true},
+	}
+
+	for _, tt := range tests {
+		id := &Identity{UserLogin: tt.login}
+		got := e.CheckL4("web", id)
+		if got != tt.want {
+			t.Errorf("CheckL4 with user %q = %v, want %v", tt.login, got, tt.want)
+		}
+	}
+}
+
+func TestCheckL4_FirstMatchWins(t *testing.T) {
+	cfg := testConfig(
+		[]config.Rule{
+			{
+				// First rule: allow only alice.
+				Match: config.RuleMatch{Listener: "web"},
+				Allow: config.AllowSpec{Users: []string{"alice@company.com"}},
+			},
+			{
+				// Second rule: allow any tailscale user.
+				Match: config.RuleMatch{Listener: "web"},
+				Allow: config.AllowSpec{AnyTailscale: true},
+			},
+		},
+		nil, "deny",
+	)
+	e := NewEngine(cfg)
+
+	// Alice matches the first rule.
+	alice := &Identity{UserLogin: "alice@company.com"}
+	if !e.CheckL4("web", alice) {
+		t.Error("expected allow for alice (first rule match)")
+	}
+
+	// Bob doesn't match first rule but matches second (any_tailscale).
+	bob := &Identity{UserLogin: "bob@company.com"}
+	if !e.CheckL4("web", bob) {
+		t.Error("expected allow for bob via second any_tailscale rule")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// CheckL7 edge cases
+// ---------------------------------------------------------------------------
+
+func TestCheckL7_NoL7Rules(t *testing.T) {
+	// No L7 rules at all — should fall through to default.
+	cfgDeny := testConfig(nil, nil, "deny")
+	eDeny := NewEngine(cfgDeny)
+
+	id := &Identity{UserLogin: "someone@example.com"}
+	if eDeny.CheckL7("web", "/anything", id) {
+		t.Error("expected deny when no L7 rules and default=deny")
+	}
+
+	cfgAllow := testConfig(nil, nil, "allow")
+	eAllow := NewEngine(cfgAllow)
+
+	if !eAllow.CheckL7("web", "/anything", id) {
+		t.Error("expected allow when no L7 rules and default=allow")
+	}
+}
+
+func TestCheckL7_ManyRules(t *testing.T) {
+	// Build 200 L7 rules — only the last one matches.
+	rules := make([]config.Rule, 200)
+	for i := range rules {
+		rules[i] = config.Rule{
+			Match: config.RuleMatch{Listener: "web", Path: fmt.Sprintf("/path-%d/*", i)},
+			Allow: config.AllowSpec{Tags: []string{fmt.Sprintf("tag:group-%d", i)}},
+		}
+	}
+	// The final catch-all.
+	rules = append(rules, config.Rule{
+		Match: config.RuleMatch{Listener: "web", Path: "/*"},
+		Allow: config.AllowSpec{AnyTailscale: true},
+	})
+
+	cfg := testConfig(nil, rules, "deny")
+	e := NewEngine(cfg)
+
+	id := &Identity{UserLogin: "someone@example.com"}
+
+	start := time.Now()
+	if !e.CheckL7("web", "/unmatched-path", id) {
+		t.Error("expected allow via catch-all after 200 non-matching rules")
+	}
+	elapsed := time.Since(start)
+	if elapsed > 100*time.Millisecond {
+		t.Errorf("CheckL7 with 200+ rules took %v, expected < 100ms", elapsed)
+	}
+}
+
+func TestCheckL7_FirstMatchWins_MultiplePathRules(t *testing.T) {
+	cfg := testConfig(nil,
+		[]config.Rule{
+			{
+				// Rule 0: /data/* only for admins.
+				Match: config.RuleMatch{Listener: "web", Path: "/data/*"},
+				Allow: config.AllowSpec{Tags: []string{"tag:admin"}},
+			},
+			{
+				// Rule 1: /data/* for anyone (would be catch-all for this path).
+				Match: config.RuleMatch{Listener: "web", Path: "/data/*"},
+				Allow: config.AllowSpec{AnyTailscale: true},
+			},
+		},
+		"deny",
+	)
+	e := NewEngine(cfg)
+
+	// Admin tag matches rule 0.
+	admin := &Identity{Tags: []string{"tag:admin"}, IsTagged: true}
+	if !e.CheckL7("web", "/data/secret", admin) {
+		t.Error("expected allow for admin on /data/secret")
+	}
+
+	// Non-admin: rule 0 path matches but identity doesn't — first match wins, deny.
+	user := &Identity{UserLogin: "user@example.com"}
+	if e.CheckL7("web", "/data/secret", user) {
+		t.Error("expected deny for non-admin on /data/secret (first-match-wins)")
+	}
+}
+
+func TestCheckL7_GroupsMatching(t *testing.T) {
+	cfg := testConfig(nil,
+		[]config.Rule{{
+			Match: config.RuleMatch{Listener: "web", Path: "/internal/*"},
+			Allow: config.AllowSpec{Groups: []string{"group:engineering", "group:ops"}},
+		}},
+		"deny",
+	)
+	e := NewEngine(cfg)
+
+	eng := &Identity{Tags: []string{"group:engineering"}, IsTagged: true}
+	if !e.CheckL7("web", "/internal/dashboard", eng) {
+		t.Error("expected allow for group:engineering")
+	}
+
+	ops := &Identity{Tags: []string{"group:ops"}, IsTagged: true}
+	if !e.CheckL7("web", "/internal/dashboard", ops) {
+		t.Error("expected allow for group:ops")
+	}
+
+	sales := &Identity{Tags: []string{"group:sales"}, IsTagged: true}
+	if e.CheckL7("web", "/internal/dashboard", sales) {
+		t.Error("expected deny for group:sales")
+	}
+}
+
+func TestCheckL7_EmptyAllowSpec(t *testing.T) {
+	cfg := testConfig(nil,
+		[]config.Rule{{
+			Match: config.RuleMatch{Listener: "web", Path: "/*"},
+			Allow: config.AllowSpec{}, // empty: no users, tags, groups; any_tailscale=false
+		}},
+		"deny",
+	)
+	e := NewEngine(cfg)
+
+	id := &Identity{UserLogin: "someone@example.com", Tags: []string{"tag:foo"}}
+	if e.CheckL7("web", "/anything", id) {
+		t.Error("expected deny for empty allow spec")
+	}
+}
+
+func TestCheckL7_PathWithQueryString(t *testing.T) {
+	cfg := testConfig(nil,
+		[]config.Rule{{
+			Match: config.RuleMatch{Listener: "web", Path: "/public/*"},
+			Allow: config.AllowSpec{AnyTailscale: true},
+		}},
+		"deny",
+	)
+	e := NewEngine(cfg)
+
+	id := &Identity{UserLogin: "user@example.com"}
+	if !e.CheckL7("web", "/public/page?foo=bar&baz=1", id) {
+		t.Error("expected path with query string to match /public/* prefix")
+	}
+}
+
+func TestCheckL7_PathDotSegments(t *testing.T) {
+	cfg := testConfig(nil,
+		[]config.Rule{
+			{
+				Match: config.RuleMatch{Listener: "web", Path: "/admin/*"},
+				Allow: config.AllowSpec{Users: []string{"admin@company.com"}},
+			},
+			{
+				Match: config.RuleMatch{Listener: "web", Path: "/public/*"},
+				Allow: config.AllowSpec{AnyTailscale: true},
+			},
+		},
+		"deny",
+	)
+	e := NewEngine(cfg)
+
+	// Path traversal string — no normalization means it matches /public/* literally.
+	id := &Identity{UserLogin: "sneaky@example.com"}
+	if !e.CheckL7("web", "/public/../admin/secret", id) {
+		t.Error("expected match on /public/* for literal dot-segment path (no normalization)")
+	}
+}
+
+func TestCheckL7_VeryLongPath(t *testing.T) {
+	cfg := testConfig(nil,
+		[]config.Rule{{
+			Match: config.RuleMatch{Listener: "web", Path: "/*"},
+			Allow: config.AllowSpec{AnyTailscale: true},
+		}},
+		"deny",
+	)
+	e := NewEngine(cfg)
+
+	longPath := "/" + strings.Repeat("segment/", 200)
+	id := &Identity{UserLogin: "user@example.com"}
+	if !e.CheckL7("web", longPath, id) {
+		t.Error("expected allow for very long path under catch-all")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Reload edge cases
+// ---------------------------------------------------------------------------
+
+func TestReload_NilConfig(t *testing.T) {
+	cfg := testConfig(nil, nil, "deny")
+	e := NewEngine(cfg)
+
+	// Reload with nil — subsequent calls should panic if dereferenced, which
+	// confirms Reload actually swaps the config. We just verify no panic in
+	// the Reload call itself.
+	e.Reload(nil)
+
+	// Accessing after nil reload will panic — that's expected behavior.
+	// We don't call CheckL4/CheckL7 here because the contract requires a
+	// valid config.
+}
+
+func TestReload_ConcurrentAccess(t *testing.T) {
+	initial := testConfig(nil, nil, "deny")
+	e := NewEngine(initial)
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+
+	// Spawn readers.
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			id := &Identity{UserLogin: "user@example.com"}
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					e.CheckL4("web", id)
+					e.CheckL7("web", "/test", id)
+				}
+			}
+		}()
+	}
+
+	// Spawn a writer that reloads repeatedly.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			var dflt string
+			if i%2 == 0 {
+				dflt = "allow"
+			} else {
+				dflt = "deny"
+			}
+			e.Reload(testConfig(
+				[]config.Rule{{
+					Match: config.RuleMatch{Listener: "web"},
+					Allow: config.AllowSpec{AnyTailscale: true},
+				}},
+				nil, dflt,
+			))
+		}
+		close(stop)
+	}()
+
+	wg.Wait()
+	// If the race detector doesn't fire, the concurrent access is safe.
 }

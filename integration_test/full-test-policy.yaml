@@ -1,0 +1,111 @@
+tailscale:
+  hostname: "tailvoy-full-test"
+  authkey: "${TS_AUTHKEY}"
+  ephemeral: true
+
+listeners:
+  # L7 listener - HTTP with ext_authz path-based rules
+  - name: http
+    protocol: tcp
+    listen: ":80"
+    forward: "backend:8080"
+    l7_policy: true
+
+  # L4-only listener - allow any tailscale
+  - name: open-tcp
+    protocol: tcp
+    listen: ":8081"
+    forward: "backend:8080"
+    l7_policy: false
+
+  # L4-only listener - restricted to specific user
+  - name: user-restricted
+    protocol: tcp
+    listen: ":8082"
+    forward: "backend:8080"
+    l7_policy: false
+
+  # L4-only listener - restricted to nonexistent tag (should deny)
+  - name: tag-restricted
+    protocol: tcp
+    listen: ":8083"
+    forward: "backend:8080"
+    l7_policy: false
+
+  # L4 listener - allow any, no L7
+  - name: passthrough
+    protocol: tcp
+    listen: ":8084"
+    forward: "backend:8080"
+    l7_policy: false
+
+l4_rules:
+  - match:
+      listener: http
+    allow:
+      any_tailscale: true
+
+  - match:
+      listener: open-tcp
+    allow:
+      any_tailscale: true
+
+  - match:
+      listener: user-restricted
+    allow:
+      users: ["rajsinghtech@github"]
+
+  - match:
+      listener: tag-restricted
+    allow:
+      tags: ["tag:nonexistent-deny-tag"]
+
+  - match:
+      listener: passthrough
+    allow:
+      any_tailscale: true
+
+l7_rules:
+  # Strict admin path - requires nonexistent tag
+  - match:
+      listener: http
+      path: "/admin/*"
+    allow:
+      tags: ["tag:admin-only"]
+
+  # API path - specific user only
+  - match:
+      listener: http
+      path: "/api/v1/secret/*"
+    allow:
+      users: ["rajsinghtech@github"]
+
+  # API path - any tailscale
+  - match:
+      listener: http
+      path: "/api/*"
+    allow:
+      any_tailscale: true
+
+  # Health endpoint - any tailscale
+  - match:
+      listener: http
+      path: "/health"
+    allow:
+      any_tailscale: true
+
+  # Public assets
+  - match:
+      listener: http
+      path: "/public/*"
+    allow:
+      any_tailscale: true
+
+  # Catch-all for / root
+  - match:
+      listener: http
+      path: "/"
+    allow:
+      any_tailscale: true
+
+default: deny

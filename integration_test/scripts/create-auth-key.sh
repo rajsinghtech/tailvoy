@@ -29,8 +29,8 @@ if [[ ! "$TAG_NAME" =~ ^[a-zA-Z0-9_-]+$ ]]; then
     exit 1
 fi
 
-echo "Creating auth key for tag:$TAG_NAME in tailnet: $TAILNET_NAME"
-echo "Options: ephemeral=$EPHEMERAL, preauthorized=$PREAUTHORIZED, reusable=$REUSABLE"
+echo "Creating auth key for tag:$TAG_NAME in tailnet: $TAILNET_NAME" >&2
+echo "Options: ephemeral=$EPHEMERAL, preauthorized=$PREAUTHORIZED, reusable=$REUSABLE" >&2
 
 AUTH_KEY_JSON=$(cat <<EOF
 {
@@ -64,5 +64,5 @@ if [ "$HTTP_STATUS" != "200" ]; then
     exit 1
 fi
 
-echo "Auth key created successfully:" >&2
-echo "$RESPONSE_BODY" | jq .
+echo "Auth key created successfully" >&2
+echo "$RESPONSE_BODY"

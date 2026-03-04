@@ -34,7 +34,7 @@ jobs:
           echo "::add-mask::$JWT"
           echo "jwt=$JWT" >> "$GITHUB_OUTPUT"
 
-      - name: Exchange OIDC token for access token
+      - name: Exchange OIDC token for org access token
         id: token
         run: |
           ACCESS_TOKEN=$(./integration_test/scripts/exchange-oidc-token.sh \
@@ -50,36 +50,49 @@ jobs:
           CREATE_OUTPUT=$(./integration_test/scripts/create-tailnet.sh \
             "${{ steps.token.outputs.access_token }}" \
             "$DISPLAY_NAME")
-          TAILNET_NAME=$(echo "$CREATE_OUTPUT" | jq -r '.dnsName')
+
+          TAILNET_NAME=$(echo "$CREATE_OUTPUT" | jq -r '.dnsName // .tailnetName')
+          OAUTH_CLIENT_ID=$(echo "$CREATE_OUTPUT" | jq -r '.oauthClient.id // .oauthClient.oauthClientID')
+          OAUTH_CLIENT_SECRET=$(echo "$CREATE_OUTPUT" | jq -r '.oauthClient.secret // .oauthClient.oauthClientSecret')
+
           if [ -z "$TAILNET_NAME" ] || [ "$TAILNET_NAME" = "null" ]; then
             echo "Error: could not extract dnsName from create response" >&2
             echo "$CREATE_OUTPUT" >&2
             exit 1
           fi
+          if [ -z "$OAUTH_CLIENT_ID" ] || [ "$OAUTH_CLIENT_ID" = "null" ]; then
+            echo "Error: could not extract oauthClient.id from create response" >&2
+            exit 1
+          fi
+
+          echo "::add-mask::$OAUTH_CLIENT_SECRET"
           echo "tailnet_name=$TAILNET_NAME" >> "$GITHUB_OUTPUT"
+          echo "oauth_client_id=$OAUTH_CLIENT_ID" >> "$GITHUB_OUTPUT"
+          echo "oauth_client_secret=$OAUTH_CLIENT_SECRET" >> "$GITHUB_OUTPUT"
+
+      - name: Get tailnet-scoped access token
+        id: tailnet_token
+        run: |
+          TAILNET_TOKEN=$(./integration_test/scripts/get-access-token.sh \
+            "${{ steps.create.outputs.oauth_client_id }}" \
+            "${{ steps.create.outputs.oauth_client_secret }}")
+          echo "::add-mask::$TAILNET_TOKEN"
+          echo "tailnet_token=$TAILNET_TOKEN" >> "$GITHUB_OUTPUT"
 
       - name: Apply test ACL
         run: |
-          for i in 1 2 3 4 5; do
-            if ./integration_test/scripts/update-acl.sh \
-              "${{ steps.token.outputs.access_token }}" \
-              "${{ steps.create.outputs.tailnet_name }}" \
-              ./integration_test/scripts/test-acl.json; then
-              exit 0
-            fi
-            echo "ACL update attempt $i failed, retrying in 5s..."
-            sleep 5
-          done
-          echo "ACL update failed after 5 attempts"
-          exit 1
+          ./integration_test/scripts/update-acl.sh \
+            "${{ steps.tailnet_token.outputs.tailnet_token }}" \
+            "${{ steps.create.outputs.tailnet_name }}" \
+            ./integration_test/scripts/test-acl.json
 
       - name: Create auth key
         id: authkey
         run: |
           AUTHKEY_JSON=$(./integration_test/scripts/create-auth-key.sh \
-            "${{ steps.token.outputs.access_token }}" \
+            "${{ steps.tailnet_token.outputs.tailnet_token }}" \
             "${{ steps.create.outputs.tailnet_name }}" \
-            "kind" true true)
+            "kind" true true true)
           TS_AUTHKEY=$(echo "$AUTHKEY_JSON" | jq -r '.key')
           echo "::add-mask::$TS_AUTHKEY"
           echo "ts_authkey=$TS_AUTHKEY" >> "$GITHUB_OUTPUT"
@@ -117,9 +130,7 @@ jobs:
       - name: Install Tailscale
         uses: tailscale/github-action@v4
         with:
-          oauth-client-id: TbqNGJkY5611CNTRL-kz4CwX2LK721CNTRL
-          audience: api.tailscale.com/TbqNGJkY5611CNTRL-kz4CwX2LK721CNTRL
-          tags: tag:kind
+          authkey: ${{ needs.setup-tailnet.outputs.ts_authkey }}
 
       - name: Run kind integration tests
         env:
@@ -144,7 +155,7 @@ jobs:
 
   cleanup-tailnet:
     if: always()
-    needs: setup-tailnet
+    needs: [setup-tailnet, kind-test]
     runs-on: ubuntu-latest
     timeout-minutes: 5
 

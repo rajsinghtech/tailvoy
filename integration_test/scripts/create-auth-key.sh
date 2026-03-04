@@ -45,7 +45,7 @@ AUTH_KEY_JSON=$(cat <<EOF
     }
   },
   "expirySeconds": 7776000,
-  "description": "Auth key for tag:$TAG_NAME"
+  "description": "CI auth key for $TAG_NAME"
 }
 EOF
 )

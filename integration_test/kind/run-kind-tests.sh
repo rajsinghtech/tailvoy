@@ -80,12 +80,17 @@ else
     echo "FATAL: ncat or nc not found"
     exit 1
 fi
-# Check for grpcurl (needed for gRPC tests)
+# Check for grpcurl (needed for gRPC deny tests)
 HAS_GRPCURL=false
 if command -v grpcurl &>/dev/null; then
     HAS_GRPCURL=true
 fi
-echo "All prerequisites found (using $NC_CMD for TCP/UDP, grpcurl=$HAS_GRPCURL)"
+# Check for grpc-health-probe (needed for gRPC health tests)
+HAS_HEALTHPROBE=false
+if command -v grpc-health-probe &>/dev/null; then
+    HAS_HEALTHPROBE=true
+fi
+echo "All prerequisites found (using $NC_CMD for TCP/UDP, grpcurl=$HAS_GRPCURL, grpc-health-probe=$HAS_HEALTHPROBE)"
 
 # --- Load TS_AUTHKEY ---
 if [ -z "${TS_AUTHKEY:-}" ]; then
@@ -283,8 +288,16 @@ BODY=$(curl -sf --max-time 10 "http://$IP:80/public/headers" 2>&1 || true)
 USER_HDR=$(echo "$BODY" | jq -r '.headers["X-Tailscale-User"]' 2>/dev/null || true)
 NODE_HDR=$(echo "$BODY" | jq -r '.headers["X-Tailscale-Node"]' 2>/dev/null || true)
 IP_HDR=$(echo "$BODY" | jq -r '.headers["X-Tailscale-Ip"]' 2>/dev/null || true)
+TAGS_HDR=$(echo "$BODY" | jq -r '.headers["X-Tailscale-Tags"]' 2>/dev/null || true)
 
-if [ -n "$USER_HDR" ] && [ "$USER_HDR" != "null" ]; then test_pass "HTTP: x-tailscale-user present"; else test_fail "HTTP: x-tailscale-user present" "got '$USER_HDR'"; fi
+# Tagged nodes (tag:kind) have no user login — check for tags or user
+if [ -n "$USER_HDR" ] && [ "$USER_HDR" != "null" ]; then
+    test_pass "HTTP: x-tailscale identity (user)"
+elif [ -n "$TAGS_HDR" ] && [ "$TAGS_HDR" != "null" ] && [ "$TAGS_HDR" != "" ]; then
+    test_pass "HTTP: x-tailscale identity (tagged node)"
+else
+    test_fail "HTTP: x-tailscale identity" "no user or tags found"
+fi
 if [ -n "$NODE_HDR" ] && [ "$NODE_HDR" != "null" ]; then test_pass "HTTP: x-tailscale-node present"; else test_fail "HTTP: x-tailscale-node present" "empty"; fi
 if [ -n "$IP_HDR" ] && [ "$IP_HDR" != "null" ]; then test_pass "HTTP: x-tailscale-ip present"; else test_fail "HTTP: x-tailscale-ip present" "empty"; fi
 
@@ -386,26 +399,34 @@ echo "========================================"
 echo "  GRPCRoute TESTS"
 echo "========================================"
 
-if [ "$HAS_GRPCURL" = "true" ]; then
-    # Cap rule: {"listeners": ["grpc"], "routes": ["/grpc.health.v1.Health/*"]}
-    # SecurityPolicy contextExtensions: listener=grpc
+# Cap rule: {"listeners": ["grpc"], "routes": ["/grpc.health.v1.Health/*"]}
+# SecurityPolicy contextExtensions: listener=grpc
 
+# grpc-health-probe doesn't use reflection, so it works with restricted cap routes.
+if [ "$HAS_HEALTHPROBE" = "true" ]; then
     # Allow: /grpc.health.v1.Health/Check matches prefix /grpc.health.v1.Health/*
-    GRPC_OUT=$(grpcurl -plaintext -max-time 10 "$IP:50051" grpc.health.v1.Health/Check 2>&1 || true)
-    if echo "$GRPC_OUT" | grep -q "SERVING"; then
+    GRPC_OUT=$(grpc-health-probe -addr "$IP:50051" -connect-timeout 10s -rpc-timeout 10s 2>&1; echo "EXIT:$?")
+    GRPC_EXIT=$(echo "$GRPC_OUT" | grep -o 'EXIT:[0-9]*' | cut -d: -f2)
+    if [ "$GRPC_EXIT" = "0" ]; then
         test_pass "gRPC: health check allow"
     else
         test_fail "gRPC: health check allow" "got '$GRPC_OUT'"
     fi
 
     # Allow: named service health check (same path prefix /grpc.health.v1.Health/*)
-    GRPC_OUT2=$(grpcurl -plaintext -max-time 10 -d '{"service":"echo"}' "$IP:50051" grpc.health.v1.Health/Check 2>&1 || true)
-    if echo "$GRPC_OUT2" | grep -q "SERVING"; then
+    GRPC_OUT2=$(grpc-health-probe -addr "$IP:50051" -service echo -connect-timeout 10s -rpc-timeout 10s 2>&1; echo "EXIT:$?")
+    GRPC_EXIT2=$(echo "$GRPC_OUT2" | grep -o 'EXIT:[0-9]*' | cut -d: -f2)
+    if [ "$GRPC_EXIT2" = "0" ]; then
         test_pass "gRPC: named service health allow"
     else
         test_fail "gRPC: named service health allow" "got '$GRPC_OUT2'"
     fi
+else
+    echo "  SKIP: grpc-health-probe not found, skipping gRPC health tests"
+fi
 
+# grpcurl uses reflection which is denied by cap routes — perfect for deny test.
+if [ "$HAS_GRPCURL" = "true" ]; then
     # Deny: reflection uses /grpc.reflection.v1alpha.ServerReflection/* — not in cap routes
     GRPC_DENY=$(grpcurl -plaintext -max-time 10 "$IP:50051" list 2>&1 || true)
     if echo "$GRPC_DENY" | grep -qi "PermissionDenied\|code = 7\|PERMISSION_DENIED"; then
@@ -414,7 +435,7 @@ if [ "$HAS_GRPCURL" = "true" ]; then
         test_fail "gRPC: reflection deny (not in cap routes)" "got '$GRPC_DENY'"
     fi
 else
-    echo "  SKIP: grpcurl not found, skipping gRPC tests"
+    echo "  SKIP: grpcurl not found, skipping gRPC deny test"
 fi
 
 # =====================================================

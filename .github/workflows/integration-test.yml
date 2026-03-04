@@ -118,8 +118,10 @@ jobs:
       - name: Install Helm
         uses: azure/setup-helm@v4
 
-      - name: Install grpcurl
-        run: go install github.com/fullstorydev/grpcurl/cmd/grpcurl@latest
+      - name: Install gRPC tools
+        run: |
+          go install github.com/fullstorydev/grpcurl/cmd/grpcurl@latest
+          go install github.com/grpc-ecosystem/grpc-health-probe@latest
 
       - name: Install ncat
         run: sudo apt-get install -y ncat

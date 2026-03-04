@@ -1,0 +1,45 @@
+name: Integration Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'push'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build images
+        run: docker compose -f integration_test/docker-compose-full.yaml build
+
+      - name: Run integration tests
+        env:
+          TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
+        run: make integration-test
+
+      - name: Collect logs on failure
+        if: failure()
+        run: |
+          docker compose -f integration_test/docker-compose-full.yaml logs tailvoy > tailvoy.log 2>&1 || true
+          docker compose -f integration_test/docker-compose-full.yaml logs backend > backend.log 2>&1 || true
+
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-test-logs
+          path: |
+            tailvoy.log
+            backend.log
+          retention-days: 7

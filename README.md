@@ -16,7 +16,7 @@ Tailnet Client (100.x.x.x)
 
 ## How it works
 
-tailvoy embeds [tsnet](https://pkg.go.dev/tailscale.com/tsnet) to join the tailnet directly — no sidecar Tailscale daemon needed. Every inbound connection triggers a WhoIs lookup to resolve the caller's Tailscale identity (user, tags, node). L4 rules gate connections at the listener level. For HTTP/gRPC traffic, tailvoy runs an [ext_authz](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_authz_filter) server that Envoy consults on every request, enabling path/host/method-level policies.
+tailvoy embeds [tsnet](https://pkg.go.dev/tailscale.com/tsnet) to join the tailnet directly — no sidecar Tailscale daemon needed. Every inbound connection triggers a WhoIs lookup to resolve the caller's Tailscale identity (user, tags, node). L4 rules gate connections at the listener level. For HTTP/gRPC traffic, tailvoy runs a gRPC [ext_authz](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_authz_filter) server that Envoy consults on every request, enabling path/host/method-level policies. In EG data plane mode, each SecurityPolicy uses `contextExtensions` to pass the listener name to the auth server per-route, so policy evaluation targets the correct listener.
 
 tailvoy supports two deployment modes:
 
@@ -101,6 +101,34 @@ spec:
 ```
 
 EG's generated Envoy args are appended after `--` automatically.
+
+Then apply a SecurityPolicy with gRPC ext_authz and `contextExtensions` to pass the listener name:
+
+```yaml
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata:
+  name: tailvoy-authz
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: my-route
+  extAuth:
+    grpc:
+      backendRefs:
+        - name: tailvoy-authz
+          namespace: envoy-gateway-system
+          port: 9001
+    contextExtensions:
+      - name: listener
+        type: Value
+        value: "http"    # must match a listener name in the policy file
+```
+
+The `contextExtensions` field tells Envoy to include `{"listener": "http"}` in the gRPC `CheckRequest` sent to the auth server. This is how tailvoy knows which listener's L7 rules to evaluate for each route. Without it, requests fall back to the `"default"` listener.
+
+> **Requires Envoy Gateway v1.7.0+** — `contextExtensions` support was added in [envoyproxy/gateway#7383](https://github.com/envoyproxy/gateway/pull/7383).
 
 ### Flags
 

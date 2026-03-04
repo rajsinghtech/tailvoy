@@ -5,11 +5,14 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
+	authv3 "github.com/envoyproxy/go-control-plane/envoy/service/auth/v3"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	"tailscale.com/client/tailscale/apitype"
 	"tailscale.com/tailcfg"
 
@@ -36,6 +39,48 @@ func testServer(t *testing.T, cfg *config.Config, responses map[string]*apitype.
 	engine := policy.NewEngine(cfg)
 	resolver := identity.NewResolver(&mockWhoIs{responses: responses})
 	return NewServer(engine, resolver, slog.Default())
+}
+
+// startGRPC starts the ext_authz gRPC server on an ephemeral port and returns
+// a connected client. The server and connection are cleaned up when t finishes.
+func startGRPC(t *testing.T, srv *Server) authv3.AuthorizationClient {
+	t.Helper()
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	gs := grpc.NewServer()
+	authv3.RegisterAuthorizationServer(gs, srv)
+	go gs.Serve(lis)
+
+	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		conn.Close()
+		gs.GracefulStop()
+	})
+
+	return authv3.NewAuthorizationClient(conn)
+}
+
+// checkReq builds a CheckRequest with the given headers and optional context extensions.
+func checkReq(headers map[string]string, path, host, method string, contextExtensions map[string]string) *authv3.CheckRequest {
+	return &authv3.CheckRequest{
+		Attributes: &authv3.AttributeContext{
+			Request: &authv3.AttributeContext_Request{
+				Http: &authv3.AttributeContext_HttpRequest{
+					Headers: headers,
+					Path:    path,
+					Host:    host,
+					Method:  method,
+				},
+			},
+			ContextExtensions: contextExtensions,
+		},
+	}
 }
 
 // baseCfg returns a config that allows any tailscale user on "/*" for listener "default".
@@ -89,27 +134,46 @@ var adminResp = &apitype.WhoIsResponse{
 	},
 }
 
+func isOK(resp *authv3.CheckResponse) bool {
+	return resp.GetStatus().GetCode() == int32(codes.OK)
+}
+
+func getResponseHeader(resp *authv3.CheckResponse, key string) string {
+	ok := resp.GetOkResponse()
+	if ok == nil {
+		return ""
+	}
+	for _, h := range ok.GetHeaders() {
+		if h.GetHeader().GetKey() == key {
+			return h.GetHeader().GetValue()
+		}
+	}
+	return ""
+}
+
 func TestAllowRequest(t *testing.T) {
 	srv := testServer(t, baseCfg(), map[string]*apitype.WhoIsResponse{
 		"100.64.1.1": aliceResp,
 	})
+	client := startGRPC(t, srv)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/data", nil)
-	req.Header.Set("x-forwarded-for", "100.64.1.1")
-	rec := httptest.NewRecorder()
-
-	srv.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", rec.Code)
+	resp, err := client.Check(context.Background(), checkReq(
+		map[string]string{"x-forwarded-for": "100.64.1.1"},
+		"/api/data", "", "GET", nil,
+	))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := rec.Header().Get("x-tailscale-user"); got != "alice@example.com" {
+	if !isOK(resp) {
+		t.Fatalf("expected OK, got code %d", resp.GetStatus().GetCode())
+	}
+	if got := getResponseHeader(resp, "x-tailscale-user"); got != "alice@example.com" {
 		t.Errorf("x-tailscale-user = %q, want alice@example.com", got)
 	}
-	if got := rec.Header().Get("x-tailscale-node"); got != "alice-laptop.tail1234.ts.net" {
+	if got := getResponseHeader(resp, "x-tailscale-node"); got != "alice-laptop.tail1234.ts.net" {
 		t.Errorf("x-tailscale-node = %q", got)
 	}
-	if got := rec.Header().Get("x-tailscale-ip"); got != "100.64.1.1" {
+	if got := getResponseHeader(resp, "x-tailscale-ip"); got != "100.64.1.1" {
 		t.Errorf("x-tailscale-ip = %q", got)
 	}
 }
@@ -118,17 +182,19 @@ func TestAdminPathAllowForAdmin(t *testing.T) {
 	srv := testServer(t, adminCfg(), map[string]*apitype.WhoIsResponse{
 		"100.64.2.2": adminResp,
 	})
+	client := startGRPC(t, srv)
 
-	req := httptest.NewRequest(http.MethodGet, "/admin/settings", nil)
-	req.Header.Set("x-forwarded-for", "100.64.2.2")
-	rec := httptest.NewRecorder()
-
-	srv.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 for admin user on /admin/settings, got %d", rec.Code)
+	resp, err := client.Check(context.Background(), checkReq(
+		map[string]string{"x-forwarded-for": "100.64.2.2"},
+		"/admin/settings", "", "GET", nil,
+	))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := rec.Header().Get("x-tailscale-user"); got != "admin@example.com" {
+	if !isOK(resp) {
+		t.Fatalf("expected OK for admin user on /admin/settings, got code %d", resp.GetStatus().GetCode())
+	}
+	if got := getResponseHeader(resp, "x-tailscale-user"); got != "admin@example.com" {
 		t.Errorf("x-tailscale-user = %q", got)
 	}
 }
@@ -137,18 +203,17 @@ func TestAdminPathDenyForNonAdmin(t *testing.T) {
 	srv := testServer(t, adminCfg(), map[string]*apitype.WhoIsResponse{
 		"100.64.1.1": aliceResp,
 	})
+	client := startGRPC(t, srv)
 
-	// Non-admin user hits /admin path -- should be denied because
-	// the /admin/* rule matches but alice isn't in the allow list,
-	// and first-match wins so the catch-all never fires.
-	req := httptest.NewRequest(http.MethodGet, "/admin/settings", nil)
-	req.Header.Set("x-forwarded-for", "100.64.1.1")
-	rec := httptest.NewRecorder()
-
-	srv.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("expected 403 for non-admin on /admin path, got %d", rec.Code)
+	resp, err := client.Check(context.Background(), checkReq(
+		map[string]string{"x-forwarded-for": "100.64.1.1"},
+		"/admin/settings", "", "GET", nil,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if isOK(resp) {
+		t.Fatal("expected deny for non-admin on /admin path")
 	}
 }
 
@@ -156,29 +221,32 @@ func TestNonAdminOnCatchAll(t *testing.T) {
 	srv := testServer(t, adminCfg(), map[string]*apitype.WhoIsResponse{
 		"100.64.1.1": aliceResp,
 	})
+	client := startGRPC(t, srv)
 
-	// Non-admin on a non-admin path should be allowed by the catch-all.
-	req := httptest.NewRequest(http.MethodGet, "/api/data", nil)
-	req.Header.Set("x-forwarded-for", "100.64.1.1")
-	rec := httptest.NewRecorder()
-
-	srv.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 for alice on /api/data, got %d", rec.Code)
+	resp, err := client.Check(context.Background(), checkReq(
+		map[string]string{"x-forwarded-for": "100.64.1.1"},
+		"/api/data", "", "GET", nil,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !isOK(resp) {
+		t.Fatalf("expected OK for alice on /api/data, got code %d", resp.GetStatus().GetCode())
 	}
 }
 
 func TestNoSourceIP(t *testing.T) {
 	srv := testServer(t, baseCfg(), nil)
+	client := startGRPC(t, srv)
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	rec := httptest.NewRecorder()
-
-	srv.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("expected 403 with no source IP, got %d", rec.Code)
+	resp, err := client.Check(context.Background(), checkReq(
+		map[string]string{}, "/", "", "GET", nil,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if isOK(resp) {
+		t.Fatal("expected deny with no source IP")
 	}
 }
 
@@ -186,61 +254,56 @@ func TestUnknownIP(t *testing.T) {
 	srv := testServer(t, baseCfg(), map[string]*apitype.WhoIsResponse{
 		"100.64.1.1": aliceResp,
 	})
+	client := startGRPC(t, srv)
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.Header.Set("x-forwarded-for", "100.64.99.99")
-	rec := httptest.NewRecorder()
-
-	srv.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("expected 403 for unknown IP, got %d", rec.Code)
+	resp, err := client.Check(context.Background(), checkReq(
+		map[string]string{"x-forwarded-for": "100.64.99.99"},
+		"/", "", "GET", nil,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if isOK(resp) {
+		t.Fatal("expected deny for unknown IP")
 	}
 }
 
 func TestExtractSourceIP(t *testing.T) {
 	tests := []struct {
-		name  string
-		xff   string
-		envoy string
-		want  string
+		name    string
+		headers map[string]string
+		want    string
 	}{
 		{
-			name: "single xff",
-			xff:  "100.64.1.1",
-			want: "100.64.1.1",
+			name:    "single xff",
+			headers: map[string]string{"x-forwarded-for": "100.64.1.1"},
+			want:    "100.64.1.1",
 		},
 		{
-			name: "multiple xff picks first",
-			xff:  "100.64.1.1, 10.0.0.1, 192.168.1.1",
-			want: "100.64.1.1",
+			name:    "multiple xff picks first",
+			headers: map[string]string{"x-forwarded-for": "100.64.1.1, 10.0.0.1, 192.168.1.1"},
+			want:    "100.64.1.1",
 		},
 		{
-			name:  "empty xff falls back to envoy header",
-			envoy: "100.64.2.2",
-			want:  "100.64.2.2",
+			name:    "empty xff falls back to envoy header",
+			headers: map[string]string{"x-envoy-external-address": "100.64.2.2"},
+			want:    "100.64.2.2",
 		},
 		{
-			name: "no headers returns empty",
-			want: "",
+			name:    "no headers returns empty",
+			headers: map[string]string{},
+			want:    "",
 		},
 		{
-			name: "xff with port strips it",
-			xff:  "100.64.1.1:8080",
-			want: "100.64.1.1",
+			name:    "xff with port strips it",
+			headers: map[string]string{"x-forwarded-for": "100.64.1.1:8080"},
+			want:    "100.64.1.1",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, "/", nil)
-			if tt.xff != "" {
-				req.Header.Set("x-forwarded-for", tt.xff)
-			}
-			if tt.envoy != "" {
-				req.Header.Set("x-envoy-external-address", tt.envoy)
-			}
-			got := extractSourceIP(req)
+			got := extractSourceIP(tt.headers)
 			if got != tt.want {
 				t.Errorf("extractSourceIP() = %q, want %q", got, tt.want)
 			}
@@ -248,58 +311,7 @@ func TestExtractSourceIP(t *testing.T) {
 	}
 }
 
-func TestExtractPath(t *testing.T) {
-	tests := []struct {
-		name     string
-		original string
-		urlPath  string
-		want     string
-	}{
-		{
-			name:     "uses x-envoy-original-path",
-			original: "/real/path",
-			urlPath:  "/authz",
-			want:     "/real/path",
-		},
-		{
-			name:    "falls back to URL path",
-			urlPath: "/fallback",
-			want:    "/fallback",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, tt.urlPath, nil)
-			if tt.original != "" {
-				req.Header.Set("x-envoy-original-path", tt.original)
-			}
-			got := extractPath(req)
-			if got != tt.want {
-				t.Errorf("extractPath() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestEnvoyOriginalPathHeader(t *testing.T) {
-	srv := testServer(t, baseCfg(), map[string]*apitype.WhoIsResponse{
-		"100.64.1.1": aliceResp,
-	})
-
-	req := httptest.NewRequest(http.MethodGet, "/ext_authz", nil)
-	req.Header.Set("x-forwarded-for", "100.64.1.1")
-	req.Header.Set("x-envoy-original-path", "/api/resource")
-	rec := httptest.NewRecorder()
-
-	srv.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", rec.Code)
-	}
-}
-
-func TestListenerHeader(t *testing.T) {
+func TestContextExtensionsListener(t *testing.T) {
 	cfg := &config.Config{
 		Tailscale: config.TailscaleConfig{Hostname: "test"},
 		Listeners: []config.Listener{
@@ -315,149 +327,114 @@ func TestListenerHeader(t *testing.T) {
 	srv := testServer(t, cfg, map[string]*apitype.WhoIsResponse{
 		"100.64.1.1": aliceResp,
 	})
+	client := startGRPC(t, srv)
 
-	// Without the listener header, defaults to "default" which has no rules -> deny.
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.Header.Set("x-forwarded-for", "100.64.1.1")
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("expected 403 for wrong listener, got %d", rec.Code)
+	// Without context_extensions, defaults to "default" which has no rules -> deny.
+	resp, err := client.Check(context.Background(), checkReq(
+		map[string]string{"x-forwarded-for": "100.64.1.1"},
+		"/", "", "GET", nil,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if isOK(resp) {
+		t.Fatal("expected deny for wrong listener (default fallback)")
 	}
 
-	// With the correct listener header -> allow.
-	req2 := httptest.NewRequest(http.MethodGet, "/", nil)
-	req2.Header.Set("x-forwarded-for", "100.64.1.1")
-	req2.Header.Set("x-tailvoy-listener", "internal")
-	rec2 := httptest.NewRecorder()
-	srv.ServeHTTP(rec2, req2)
-	if rec2.Code != http.StatusOK {
-		t.Fatalf("expected 200 for correct listener, got %d", rec2.Code)
+	// With the correct context extension -> allow.
+	resp2, err := client.Check(context.Background(), checkReq(
+		map[string]string{"x-forwarded-for": "100.64.1.1"},
+		"/", "", "GET", map[string]string{"listener": "internal"},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !isOK(resp2) {
+		t.Fatalf("expected OK for correct listener, got code %d", resp2.GetStatus().GetCode())
 	}
 }
 
 func TestMalformedXFF(t *testing.T) {
 	srv := testServer(t, baseCfg(), nil)
+	client := startGRPC(t, srv)
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.Header.Set("x-forwarded-for", "not-an-ip")
-	rec := httptest.NewRecorder()
-
-	srv.ServeHTTP(rec, req)
-
-	// "not-an-ip" passes extractSourceIP (it's returned as-is since it has no port
-	// and isn't empty), but the resolver will fail to parse it, returning 403.
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("expected 403 for malformed XFF, got %d", rec.Code)
+	resp, err := client.Check(context.Background(), checkReq(
+		map[string]string{"x-forwarded-for": "not-an-ip"},
+		"/", "", "GET", nil,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if isOK(resp) {
+		t.Fatal("expected deny for malformed XFF")
 	}
 }
 
 func TestMultipleIPsInXFFUsesFirst(t *testing.T) {
-	// Register two IPs: alice on .1.1, nothing on .2.2.
-	// XFF has alice first, unknown second. Should resolve alice.
 	srv := testServer(t, baseCfg(), map[string]*apitype.WhoIsResponse{
 		"100.64.1.1": aliceResp,
 	})
+	client := startGRPC(t, srv)
 
-	req := httptest.NewRequest(http.MethodGet, "/data", nil)
-	req.Header.Set("x-forwarded-for", "100.64.1.1, 100.64.2.2")
-	rec := httptest.NewRecorder()
-
-	srv.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 (first IP is alice), got %d", rec.Code)
+	resp, err := client.Check(context.Background(), checkReq(
+		map[string]string{"x-forwarded-for": "100.64.1.1, 100.64.2.2"},
+		"/data", "", "GET", nil,
+	))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := rec.Header().Get("x-tailscale-user"); got != "alice@example.com" {
+	if !isOK(resp) {
+		t.Fatalf("expected OK (first IP is alice), got code %d", resp.GetStatus().GetCode())
+	}
+	if got := getResponseHeader(resp, "x-tailscale-user"); got != "alice@example.com" {
 		t.Errorf("x-tailscale-user = %q, want alice@example.com", got)
 	}
 }
 
 func TestMultipleIPsInXFFFirstUnknown(t *testing.T) {
-	// First IP is unknown; second is alice. Should deny because only the first
-	// IP in XFF is used.
 	srv := testServer(t, baseCfg(), map[string]*apitype.WhoIsResponse{
 		"100.64.1.1": aliceResp,
 	})
+	client := startGRPC(t, srv)
 
-	req := httptest.NewRequest(http.MethodGet, "/data", nil)
-	req.Header.Set("x-forwarded-for", "100.64.99.99, 100.64.1.1")
-	rec := httptest.NewRecorder()
-
-	srv.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("expected 403 (first IP is unknown), got %d", rec.Code)
+	resp, err := client.Check(context.Background(), checkReq(
+		map[string]string{"x-forwarded-for": "100.64.99.99, 100.64.1.1"},
+		"/data", "", "GET", nil,
+	))
+	if err != nil {
+		t.Fatal(err)
 	}
-}
-
-func TestEmptyPath(t *testing.T) {
-	srv := testServer(t, baseCfg(), map[string]*apitype.WhoIsResponse{
-		"100.64.1.1": aliceResp,
-	})
-
-	// httptest.NewRequest requires a valid URL target, but we can test empty
-	// original-path header falling back to URL path of "/".
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.Header.Set("x-forwarded-for", "100.64.1.1")
-	req.URL.Path = ""
-	rec := httptest.NewRecorder()
-
-	srv.ServeHTTP(rec, req)
-
-	// The catch-all "/*" matches everything, so even an empty path is allowed.
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 for empty path with catch-all, got %d", rec.Code)
-	}
-}
-
-func TestURLEncodedPathTraversal(t *testing.T) {
-	// The admin config restricts /admin/* to admin@example.com only.
-	// Attempt path traversal using URL-encoded characters: /public/%2e%2e/admin
-	// This should NOT match /admin/* because the path matching is literal.
-	srv := testServer(t, adminCfg(), map[string]*apitype.WhoIsResponse{
-		"100.64.1.1": aliceResp,
-	})
-
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.Header.Set("x-forwarded-for", "100.64.1.1")
-	req.Header.Set("x-envoy-original-path", "/public/%2e%2e/admin")
-	rec := httptest.NewRecorder()
-
-	srv.ServeHTTP(rec, req)
-
-	// /public/%2e%2e/admin doesn't match /admin/* (literal prefix matching),
-	// so it falls to the catch-all /* which allows any tailscale user.
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 for traversal path on catch-all, got %d", rec.Code)
+	if isOK(resp) {
+		t.Fatal("expected deny (first IP is unknown)")
 	}
 }
 
 func TestXFFTakesPrecedenceOverEnvoyHeader(t *testing.T) {
-	// Both headers set; XFF should win.
 	srv := testServer(t, baseCfg(), map[string]*apitype.WhoIsResponse{
 		"100.64.1.1": aliceResp,
 		"100.64.2.2": adminResp,
 	})
+	client := startGRPC(t, srv)
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.Header.Set("x-forwarded-for", "100.64.1.1")
-	req.Header.Set("x-envoy-external-address", "100.64.2.2")
-	rec := httptest.NewRecorder()
-
-	srv.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", rec.Code)
+	resp, err := client.Check(context.Background(), checkReq(
+		map[string]string{
+			"x-forwarded-for":          "100.64.1.1",
+			"x-envoy-external-address": "100.64.2.2",
+		},
+		"/", "", "GET", nil,
+	))
+	if err != nil {
+		t.Fatal(err)
 	}
-	// Should resolve to alice (from XFF), not admin (from envoy header).
-	if got := rec.Header().Get("x-tailscale-user"); got != "alice@example.com" {
+	if !isOK(resp) {
+		t.Fatal("expected OK")
+	}
+	if got := getResponseHeader(resp, "x-tailscale-user"); got != "alice@example.com" {
 		t.Errorf("x-tailscale-user = %q, want alice@example.com (XFF should take precedence)", got)
 	}
 }
 
 func TestResolverErrorOnSecondCall(t *testing.T) {
-	// First call succeeds, second call (different IP) fails.
 	mock := &mockWhoIs{
 		responses: map[string]*apitype.WhoIsResponse{
 			"100.64.1.1": aliceResp,
@@ -468,75 +445,91 @@ func TestResolverErrorOnSecondCall(t *testing.T) {
 	engine := policy.NewEngine(cfg)
 	resolver := identity.NewResolver(mock)
 	srv := NewServer(engine, resolver, slog.Default())
+	client := startGRPC(t, srv)
 
 	// First request: known IP, should succeed.
-	req1 := httptest.NewRequest(http.MethodGet, "/", nil)
-	req1.Header.Set("x-forwarded-for", "100.64.1.1")
-	rec1 := httptest.NewRecorder()
-	srv.ServeHTTP(rec1, req1)
-	if rec1.Code != http.StatusOK {
-		t.Fatalf("first request: expected 200, got %d", rec1.Code)
+	resp, err := client.Check(context.Background(), checkReq(
+		map[string]string{"x-forwarded-for": "100.64.1.1"},
+		"/", "", "GET", nil,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !isOK(resp) {
+		t.Fatalf("first request: expected OK, got code %d", resp.GetStatus().GetCode())
 	}
 
 	// Second request: unknown IP, resolver returns error.
-	req2 := httptest.NewRequest(http.MethodGet, "/", nil)
-	req2.Header.Set("x-forwarded-for", "100.64.99.99")
-	rec2 := httptest.NewRecorder()
-	srv.ServeHTTP(rec2, req2)
-	if rec2.Code != http.StatusForbidden {
-		t.Fatalf("second request: expected 403, got %d", rec2.Code)
+	resp2, err := client.Check(context.Background(), checkReq(
+		map[string]string{"x-forwarded-for": "100.64.99.99"},
+		"/", "", "GET", nil,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if isOK(resp2) {
+		t.Fatal("second request: expected deny")
 	}
 
 	// Third request: first IP again, should still work (cached).
-	req3 := httptest.NewRequest(http.MethodGet, "/", nil)
-	req3.Header.Set("x-forwarded-for", "100.64.1.1")
-	rec3 := httptest.NewRecorder()
-	srv.ServeHTTP(rec3, req3)
-	if rec3.Code != http.StatusOK {
-		t.Fatalf("third request (cached): expected 200, got %d", rec3.Code)
+	resp3, err := client.Check(context.Background(), checkReq(
+		map[string]string{"x-forwarded-for": "100.64.1.1"},
+		"/", "", "GET", nil,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !isOK(resp3) {
+		t.Fatalf("third request (cached): expected OK, got code %d", resp3.GetStatus().GetCode())
 	}
 }
 
-func TestGracefulShutdownWhileRequestInFlight(t *testing.T) {
+func TestGracefulShutdown(t *testing.T) {
 	srv := testServer(t, baseCfg(), map[string]*apitype.WhoIsResponse{
 		"100.64.1.1": aliceResp,
 	})
 
-	errCh := make(chan error, 1)
-
-	httpSrv := &http.Server{
-		Handler: srv,
-	}
-
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ctx, cancel := context.WithCancel(context.Background())
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
+	addr := lis.Addr().String()
+	lis.Close()
 
+	errCh := make(chan error, 1)
 	go func() {
-		errCh <- httpSrv.Serve(ln)
+		errCh <- srv.ListenAndServe(ctx, addr)
 	}()
 
-	// Make a successful request to verify the server is running.
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.Header.Set("x-forwarded-for", "100.64.1.1")
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", rec.Code)
+	// Give server time to start.
+	time.Sleep(50 * time.Millisecond)
+
+	// Verify server is running by connecting.
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := authv3.NewAuthorizationClient(conn)
+
+	resp, err := client.Check(context.Background(), checkReq(
+		map[string]string{"x-forwarded-for": "100.64.1.1"},
+		"/", "", "GET", nil,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !isOK(resp) {
+		t.Fatalf("expected OK, got code %d", resp.GetStatus().GetCode())
 	}
 
-	// Initiate graceful shutdown.
-	shutdownErr := httpSrv.Shutdown(context.Background())
-	if shutdownErr != nil {
-		t.Fatalf("Shutdown error: %v", shutdownErr)
-	}
+	conn.Close()
+	cancel()
 
-	// Server.Serve should return http.ErrServerClosed.
 	select {
 	case err := <-errCh:
-		if err != http.ErrServerClosed {
-			t.Fatalf("expected ErrServerClosed, got %v", err)
+		if err != nil {
+			t.Fatalf("expected nil error from graceful stop, got %v", err)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("server did not stop in time")
@@ -566,35 +559,42 @@ func TestHostBasedRouting(t *testing.T) {
 		"100.64.1.1": aliceResp,
 		"100.64.2.2": adminResp,
 	})
+	client := startGRPC(t, srv)
 
-	// alice hitting the admin host -> 403 (host matches rule 1, alice not in allow list)
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.Host = "admin.example.com"
-	req.Header.Set("x-forwarded-for", "100.64.1.1")
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("alice on admin host: expected 403, got %d", rec.Code)
+	// alice hitting the admin host -> deny
+	resp, err := client.Check(context.Background(), checkReq(
+		map[string]string{"x-forwarded-for": "100.64.1.1"},
+		"/", "admin.example.com", "GET", nil,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if isOK(resp) {
+		t.Fatal("alice on admin host: expected deny")
 	}
 
-	// admin hitting the admin host -> 200
-	req2 := httptest.NewRequest(http.MethodGet, "/", nil)
-	req2.Host = "admin.example.com"
-	req2.Header.Set("x-forwarded-for", "100.64.2.2")
-	rec2 := httptest.NewRecorder()
-	srv.ServeHTTP(rec2, req2)
-	if rec2.Code != http.StatusOK {
-		t.Fatalf("admin on admin host: expected 200, got %d", rec2.Code)
+	// admin hitting the admin host -> allow
+	resp2, err := client.Check(context.Background(), checkReq(
+		map[string]string{"x-forwarded-for": "100.64.2.2"},
+		"/", "admin.example.com", "GET", nil,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !isOK(resp2) {
+		t.Fatalf("admin on admin host: expected OK, got code %d", resp2.GetStatus().GetCode())
 	}
 
-	// alice hitting a different host -> 200 (falls through to catch-all)
-	req3 := httptest.NewRequest(http.MethodGet, "/", nil)
-	req3.Host = "public.example.com"
-	req3.Header.Set("x-forwarded-for", "100.64.1.1")
-	rec3 := httptest.NewRecorder()
-	srv.ServeHTTP(rec3, req3)
-	if rec3.Code != http.StatusOK {
-		t.Fatalf("alice on public host: expected 200, got %d", rec3.Code)
+	// alice hitting a different host -> allow (falls through to catch-all)
+	resp3, err := client.Check(context.Background(), checkReq(
+		map[string]string{"x-forwarded-for": "100.64.1.1"},
+		"/", "public.example.com", "GET", nil,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !isOK(resp3) {
+		t.Fatalf("alice on public host: expected OK, got code %d", resp3.GetStatus().GetCode())
 	}
 }
 
@@ -616,23 +616,30 @@ func TestMethodBasedRouting(t *testing.T) {
 	srv := testServer(t, cfg, map[string]*apitype.WhoIsResponse{
 		"100.64.1.1": aliceResp,
 	})
+	client := startGRPC(t, srv)
 
 	// GET should be allowed
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.Header.Set("x-forwarded-for", "100.64.1.1")
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("alice GET: expected 200, got %d", rec.Code)
+	resp, err := client.Check(context.Background(), checkReq(
+		map[string]string{"x-forwarded-for": "100.64.1.1"},
+		"/", "", "GET", nil,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !isOK(resp) {
+		t.Fatalf("alice GET: expected OK, got code %d", resp.GetStatus().GetCode())
 	}
 
-	// POST should be denied (no matching rule, default deny)
-	req2 := httptest.NewRequest(http.MethodPost, "/", nil)
-	req2.Header.Set("x-forwarded-for", "100.64.1.1")
-	rec2 := httptest.NewRecorder()
-	srv.ServeHTTP(rec2, req2)
-	if rec2.Code != http.StatusForbidden {
-		t.Fatalf("alice POST: expected 403, got %d", rec2.Code)
+	// POST should be denied
+	resp2, err := client.Check(context.Background(), checkReq(
+		map[string]string{"x-forwarded-for": "100.64.1.1"},
+		"/", "", "POST", nil,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if isOK(resp2) {
+		t.Fatal("alice POST: expected deny")
 	}
 }
 
@@ -658,35 +665,42 @@ func TestHostAndMethodCombined(t *testing.T) {
 	srv := testServer(t, cfg, map[string]*apitype.WhoIsResponse{
 		"100.64.1.1": aliceResp,
 	})
+	client := startGRPC(t, srv)
 
-	// GET /api/data on api.example.com -> 200 (matches rule 1)
-	req := httptest.NewRequest(http.MethodGet, "/api/data", nil)
-	req.Host = "api.example.com"
-	req.Header.Set("x-forwarded-for", "100.64.1.1")
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET /api/data api.example.com: expected 200, got %d", rec.Code)
+	// GET /api/data on api.example.com -> allow (matches rule 1)
+	resp, err := client.Check(context.Background(), checkReq(
+		map[string]string{"x-forwarded-for": "100.64.1.1"},
+		"/api/data", "api.example.com", "GET", nil,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !isOK(resp) {
+		t.Fatalf("GET /api/data api.example.com: expected OK, got code %d", resp.GetStatus().GetCode())
 	}
 
-	// POST /api/data on api.example.com -> 200 (method doesn't match rule 1, falls to catch-all)
-	req2 := httptest.NewRequest(http.MethodPost, "/api/data", nil)
-	req2.Host = "api.example.com"
-	req2.Header.Set("x-forwarded-for", "100.64.1.1")
-	rec2 := httptest.NewRecorder()
-	srv.ServeHTTP(rec2, req2)
-	if rec2.Code != http.StatusOK {
-		t.Fatalf("POST /api/data api.example.com: expected 200, got %d", rec2.Code)
+	// POST /api/data on api.example.com -> allow (method doesn't match rule 1, falls to catch-all)
+	resp2, err := client.Check(context.Background(), checkReq(
+		map[string]string{"x-forwarded-for": "100.64.1.1"},
+		"/api/data", "api.example.com", "POST", nil,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !isOK(resp2) {
+		t.Fatalf("POST /api/data api.example.com: expected OK, got code %d", resp2.GetStatus().GetCode())
 	}
 
-	// GET /api/data on other.com -> 200 (host doesn't match rule 1, falls to catch-all)
-	req3 := httptest.NewRequest(http.MethodGet, "/api/data", nil)
-	req3.Host = "other.com"
-	req3.Header.Set("x-forwarded-for", "100.64.1.1")
-	rec3 := httptest.NewRecorder()
-	srv.ServeHTTP(rec3, req3)
-	if rec3.Code != http.StatusOK {
-		t.Fatalf("GET /api/data other.com: expected 200, got %d", rec3.Code)
+	// GET /api/data on other.com -> allow (host doesn't match rule 1, falls to catch-all)
+	resp3, err := client.Check(context.Background(), checkReq(
+		map[string]string{"x-forwarded-for": "100.64.1.1"},
+		"/api/data", "other.com", "GET", nil,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !isOK(resp3) {
+		t.Fatalf("GET /api/data other.com: expected OK, got code %d", resp3.GetStatus().GetCode())
 	}
 }
 
@@ -713,20 +727,94 @@ func TestTaggedNodeHeaders(t *testing.T) {
 	srv := testServer(t, cfg, map[string]*apitype.WhoIsResponse{
 		"100.64.5.5": taggedResp,
 	})
+	client := startGRPC(t, srv)
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.Header.Set("x-forwarded-for", "100.64.5.5")
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 for tagged node, got %d", rec.Code)
+	resp, err := client.Check(context.Background(), checkReq(
+		map[string]string{"x-forwarded-for": "100.64.5.5"},
+		"/", "", "GET", nil,
+	))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := rec.Header().Get("x-tailscale-tags"); got != "tag:web,tag:prod" {
+	if !isOK(resp) {
+		t.Fatalf("expected OK for tagged node, got code %d", resp.GetStatus().GetCode())
+	}
+	if got := getResponseHeader(resp, "x-tailscale-tags"); got != "tag:web,tag:prod" {
 		t.Errorf("x-tailscale-tags = %q, want tag:web,tag:prod", got)
 	}
-	// Tagged nodes have no user login.
-	if got := rec.Header().Get("x-tailscale-user"); got != "" {
+	if got := getResponseHeader(resp, "x-tailscale-user"); got != "" {
 		t.Errorf("x-tailscale-user = %q, want empty for tagged node", got)
+	}
+}
+
+// Verify the gRPC status code is reported correctly.
+func TestDenyReturnsPermissionDenied(t *testing.T) {
+	srv := testServer(t, baseCfg(), nil)
+	client := startGRPC(t, srv)
+
+	resp, err := client.Check(context.Background(), checkReq(
+		map[string]string{}, "/", "", "GET", nil,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.GetStatus().GetCode() != int32(codes.PermissionDenied) {
+		t.Errorf("deny status code = %d, want %d (PermissionDenied)", resp.GetStatus().GetCode(), codes.PermissionDenied)
+	}
+}
+
+// Verify that the gRPC call itself returns OK status (no transport error).
+func TestGRPCTransportOK(t *testing.T) {
+	srv := testServer(t, baseCfg(), nil)
+	client := startGRPC(t, srv)
+
+	_, err := client.Check(context.Background(), checkReq(
+		map[string]string{}, "/", "", "GET", nil,
+	))
+	if err != nil {
+		st, ok := status.FromError(err)
+		if !ok {
+			t.Fatalf("unexpected non-gRPC error: %v", err)
+		}
+		t.Fatalf("unexpected gRPC status: %v", st)
+	}
+}
+
+// Verify OkResponse has upstream headers.
+func TestOkResponseHeaders(t *testing.T) {
+	srv := testServer(t, baseCfg(), map[string]*apitype.WhoIsResponse{
+		"100.64.1.1": aliceResp,
+	})
+	client := startGRPC(t, srv)
+
+	resp, err := client.Check(context.Background(), checkReq(
+		map[string]string{"x-forwarded-for": "100.64.1.1"},
+		"/", "", "GET", nil,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ok := resp.GetOkResponse()
+	if ok == nil {
+		t.Fatal("expected OkResponse, got nil")
+	}
+
+	wantHeaders := map[string]string{
+		"x-tailscale-user": "alice@example.com",
+		"x-tailscale-node": "alice-laptop.tail1234.ts.net",
+		"x-tailscale-ip":   "100.64.1.1",
+		"x-tailscale-tags": "",
+	}
+
+	got := make(map[string]string)
+	for _, h := range ok.GetHeaders() {
+		got[h.GetHeader().GetKey()] = h.GetHeader().GetValue()
+	}
+
+	for k, want := range wantHeaders {
+		if got[k] != want {
+			t.Errorf("header %q = %q, want %q", k, got[k], want)
+		}
 	}
 }

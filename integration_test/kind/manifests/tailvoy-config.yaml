@@ -10,7 +10,7 @@ data:
       authkey: "${TS_AUTHKEY}"
       ephemeral: true
     listeners:
-      - name: default
+      - name: http
         protocol: tcp
         listen: ":80"
         forward: "127.0.0.1:8080"
@@ -39,7 +39,7 @@ data:
         l7_policy: false
     l4_rules:
       - match:
-          listener: default
+          listener: http
         allow:
           any_tailscale: true
       - match:
@@ -60,37 +60,37 @@ data:
           any_tailscale: true
     l7_rules:
       - match:
-          listener: default
+          listener: http
           path: "/admin/*"
         allow:
           tags: ["tag:admin-only"]
       - match:
-          listener: default
+          listener: http
           path: "/public/*"
         allow:
           any_tailscale: true
       - match:
-          listener: default
+          listener: grpc
           path: "/grpc.health.v1.Health/*"
         allow:
           any_tailscale: true
       - match:
-          listener: default
+          listener: grpc
           path: "/grpc.reflection.v1.ServerReflection/*"
         allow:
           any_tailscale: true
       - match:
-          listener: default
+          listener: grpc
           path: "/grpc.reflection.v1alpha.ServerReflection/*"
         allow:
           any_tailscale: true
       - match:
-          listener: default
+          listener: http
           path: "/health"
         allow:
           any_tailscale: true
       - match:
-          listener: default
+          listener: http
           path: "/"
         allow:
           any_tailscale: true

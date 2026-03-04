@@ -118,7 +118,7 @@ func InjectExtAuthz(bootstrapYAML string, authzAddr string) (string, error) {
 		if listenerName == "" {
 			listenerName = "default"
 		}
-		authzFilter := buildExtAuthzFilter(listenerName)
+		authzFilter := buildExtAuthzFilter()
 		fcs, ok := l["filter_chains"].([]interface{})
 		if !ok {
 			continue
@@ -144,11 +144,15 @@ func InjectExtAuthz(bootstrapYAML string, authzAddr string) (string, error) {
 				if !ok {
 					continue
 				}
+				// Inject ext_authz HTTP filter.
 				existing, _ := tc["http_filters"].([]interface{})
 				injected := make([]interface{}, 0, len(existing)+1)
 				injected = append(injected, authzFilter)
 				injected = append(injected, existing...)
 				tc["http_filters"] = injected
+
+				// Inject per-route context_extensions on all routes.
+				injectPerRouteContextExtensions(tc, listenerName)
 			}
 		}
 	}
@@ -189,9 +193,50 @@ func buildCluster(name, host, port, timeout string) map[string]interface{} {
 }
 
 // buildExtAuthzCluster creates the ext_authz cluster from an address like "host:port".
+// It includes HTTP/2 protocol options required for gRPC.
 func buildExtAuthzCluster(authzAddr string) map[string]interface{} {
 	host, port := splitHostPort(authzAddr)
-	return buildCluster("tailvoy_ext_authz", host, port, "1s")
+	c := buildCluster("tailvoy_ext_authz", host, port, "1s")
+	c["typed_extension_protocol_options"] = map[string]interface{}{
+		"envoy.extensions.upstreams.http.v3.HttpProtocolOptions": map[string]interface{}{
+			"@type": "type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions",
+			"explicit_http_config": map[string]interface{}{
+				"http2_protocol_options": map[string]interface{}{},
+			},
+		},
+	}
+	return c
+}
+
+// injectPerRouteContextExtensions walks the route_config inside an HCM
+// typed_config and adds typed_per_filter_config with the listener name
+// as a context extension for ext_authz.
+func injectPerRouteContextExtensions(hcmTC map[string]interface{}, listenerName string) {
+	rc, ok := hcmTC["route_config"].(map[string]interface{})
+	if !ok {
+		return
+	}
+	vhosts, ok := rc["virtual_hosts"].([]interface{})
+	if !ok {
+		return
+	}
+	for _, rawVH := range vhosts {
+		vh, ok := rawVH.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		routes, ok := vh["routes"].([]interface{})
+		if !ok {
+			continue
+		}
+		for _, rawRoute := range routes {
+			route, ok := rawRoute.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			route["typed_per_filter_config"] = perRouteExtAuthz(listenerName)
+		}
+	}
 }
 
 func buildHTTPListener(l config.Listener, backendCluster string) map[string]interface{} {
@@ -235,13 +280,14 @@ func buildHTTPListener(l config.Listener, backendCluster string) map[string]inte
 												"route": map[string]interface{}{
 													"cluster": backendCluster,
 												},
+												"typed_per_filter_config": perRouteExtAuthz(l.Name),
 											},
 										},
 									},
 								},
 							},
 							"http_filters": []interface{}{
-								buildExtAuthzFilter(l.Name),
+								buildExtAuthzFilter(),
 								map[string]interface{}{
 									"name": "envoy.filters.http.router",
 									"typed_config": map[string]interface{}{
@@ -283,40 +329,32 @@ func buildTCPListener(l config.Listener, backendCluster string) map[string]inter
 	}
 }
 
-func buildExtAuthzFilter(listenerName string) map[string]interface{} {
+func buildExtAuthzFilter() map[string]interface{} {
 	return map[string]interface{}{
 		"name": "envoy.filters.http.ext_authz",
 		"typed_config": map[string]interface{}{
 			"@type":              "type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz",
 			"failure_mode_allow": false,
-			"http_service": map[string]interface{}{
-				"server_uri": map[string]interface{}{
-					"uri":     "http://tailvoy-ext-authz",
-					"cluster": "tailvoy_ext_authz",
-					"timeout": "0.25s",
+			"grpc_service": map[string]interface{}{
+				"envoy_grpc": map[string]interface{}{
+					"cluster_name": "tailvoy_ext_authz",
 				},
-				"authorization_request": map[string]interface{}{
-					"allowed_headers": map[string]interface{}{
-						"patterns": []interface{}{
-							map[string]interface{}{"exact": "x-forwarded-for"},
-							map[string]interface{}{"exact": "x-envoy-external-address"},
-							map[string]interface{}{"exact": "host"},
-							map[string]interface{}{"prefix": "x-tailvoy-"},
-						},
-					},
-					"headers_to_add": []interface{}{
-						map[string]interface{}{
-							"key":   "x-tailvoy-listener",
-							"value": listenerName,
-						},
-					},
-				},
-				"authorization_response": map[string]interface{}{
-					"allowed_upstream_headers": map[string]interface{}{
-						"patterns": []interface{}{
-							map[string]interface{}{"prefix": "x-tailscale-"},
-						},
-					},
+				"timeout": "0.25s",
+			},
+			"transport_api_version": "V3",
+		},
+	}
+}
+
+// perRouteExtAuthz returns a typed_per_filter_config entry that sets
+// context_extensions with the listener name for the ext_authz filter.
+func perRouteExtAuthz(listenerName string) map[string]interface{} {
+	return map[string]interface{}{
+		"envoy.filters.http.ext_authz": map[string]interface{}{
+			"@type": "type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthzPerRoute",
+			"check_settings": map[string]interface{}{
+				"context_extensions": map[string]interface{}{
+					"listener": listenerName,
 				},
 			},
 		},

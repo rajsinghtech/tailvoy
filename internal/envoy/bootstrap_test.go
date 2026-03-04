@@ -367,7 +367,7 @@ func TestGenerateStandaloneConfigHTTPListenerHasProxyProtocol(t *testing.T) {
 	}
 }
 
-func TestGenerateStandaloneConfigHTTPListenerHasExtAuthzHTTPFilter(t *testing.T) {
+func TestGenerateStandaloneConfigHTTPListenerHasExtAuthzGRPCFilter(t *testing.T) {
 	cfg := &config.Config{
 		Tailscale: config.TailscaleConfig{Hostname: "test"},
 		Listeners: []config.Listener{
@@ -411,45 +411,39 @@ func TestGenerateStandaloneConfigHTTPListenerHasExtAuthzHTTPFilter(t *testing.T)
 		t.Errorf("first http_filter = %v, want envoy.filters.http.ext_authz", authzFilter["name"])
 	}
 
-	// Verify it uses http_service (not gRPC)
+	// Verify it uses grpc_service (not http_service)
 	authzTC := authzFilter["typed_config"].(map[string]interface{})
-	if _, ok := authzTC["http_service"]; !ok {
-		t.Error("ext_authz filter should use http_service, not grpc_service")
+	if _, ok := authzTC["grpc_service"]; !ok {
+		t.Error("ext_authz filter should use grpc_service")
 	}
-	if _, ok := authzTC["grpc_service"]; ok {
-		t.Error("ext_authz filter should not have grpc_service")
-	}
-
-	// Verify x-tailvoy-listener header is set with correct listener name
-	httpSvc := authzTC["http_service"].(map[string]interface{})
-	authzReq := httpSvc["authorization_request"].(map[string]interface{})
-	headersToAdd := authzReq["headers_to_add"].([]interface{})
-
-	found := false
-	for _, raw := range headersToAdd {
-		h := raw.(map[string]interface{})
-		if h["key"] == "x-tailvoy-listener" && h["value"] == "mylistener" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Error("ext_authz filter missing x-tailvoy-listener header with listener name")
+	if _, ok := authzTC["http_service"]; ok {
+		t.Error("ext_authz filter should not have http_service")
 	}
 
-	// Verify allowed_headers includes x-forwarded-for
-	allowedHeaders := authzReq["allowed_headers"].(map[string]interface{})
-	patterns := allowedHeaders["patterns"].([]interface{})
-	hasXFF := false
-	for _, raw := range patterns {
-		p := raw.(map[string]interface{})
-		if v, ok := p["exact"]; ok && v == "x-forwarded-for" {
-			hasXFF = true
-			break
-		}
+	// Verify grpc_service points to the correct cluster
+	grpcSvc := authzTC["grpc_service"].(map[string]interface{})
+	envoyGrpc := grpcSvc["envoy_grpc"].(map[string]interface{})
+	if envoyGrpc["cluster_name"] != "tailvoy_ext_authz" {
+		t.Errorf("cluster_name = %v, want tailvoy_ext_authz", envoyGrpc["cluster_name"])
 	}
-	if !hasXFF {
-		t.Error("ext_authz filter missing x-forwarded-for in allowed_headers")
+
+	// Verify transport_api_version is V3
+	if authzTC["transport_api_version"] != "V3" {
+		t.Errorf("transport_api_version = %v, want V3", authzTC["transport_api_version"])
+	}
+
+	// Verify per-route context_extensions with listener name
+	rc := tc["route_config"].(map[string]interface{})
+	vhosts := rc["virtual_hosts"].([]interface{})
+	vh := vhosts[0].(map[string]interface{})
+	routes := vh["routes"].([]interface{})
+	route := routes[0].(map[string]interface{})
+	perFilter := route["typed_per_filter_config"].(map[string]interface{})
+	authzPerRoute := perFilter["envoy.filters.http.ext_authz"].(map[string]interface{})
+	checkSettings := authzPerRoute["check_settings"].(map[string]interface{})
+	ctxExt := checkSettings["context_extensions"].(map[string]interface{})
+	if ctxExt["listener"] != "mylistener" {
+		t.Errorf("context_extensions listener = %v, want mylistener", ctxExt["listener"])
 	}
 
 	// Second filter should be the router
@@ -459,7 +453,7 @@ func TestGenerateStandaloneConfigHTTPListenerHasExtAuthzHTTPFilter(t *testing.T)
 	}
 }
 
-func TestGenerateStandaloneConfigExtAuthzForwardsHostHeader(t *testing.T) {
+func TestGenerateStandaloneConfigExtAuthzClusterHasHTTP2(t *testing.T) {
 	cfg := &config.Config{
 		Tailscale: config.TailscaleConfig{Hostname: "test"},
 		Listeners: []config.Listener{
@@ -479,31 +473,38 @@ func TestGenerateStandaloneConfigExtAuthzForwardsHostHeader(t *testing.T) {
 	}
 
 	sr := bootstrap["static_resources"].(map[string]interface{})
-	listeners := sr["listeners"].([]interface{})
-	l := listeners[0].(map[string]interface{})
-	fcs := l["filter_chains"].([]interface{})
-	fc := fcs[0].(map[string]interface{})
-	filters := fc["filters"].([]interface{})
-	hcm := filters[0].(map[string]interface{})
-	tc := hcm["typed_config"].(map[string]interface{})
-	httpFilters := tc["http_filters"].([]interface{})
-	authzFilter := httpFilters[0].(map[string]interface{})
-	authzTC := authzFilter["typed_config"].(map[string]interface{})
-	httpSvc := authzTC["http_service"].(map[string]interface{})
-	authzReq := httpSvc["authorization_request"].(map[string]interface{})
-	allowedHeaders := authzReq["allowed_headers"].(map[string]interface{})
-	patterns := allowedHeaders["patterns"].([]interface{})
+	clusters := sr["clusters"].([]interface{})
 
-	hasHost := false
-	for _, raw := range patterns {
-		p := raw.(map[string]interface{})
-		if v, ok := p["exact"]; ok && v == "host" {
-			hasHost = true
+	var authzCluster map[string]interface{}
+	for _, raw := range clusters {
+		c := raw.(map[string]interface{})
+		if c["name"] == "tailvoy_ext_authz" {
+			authzCluster = c
 			break
 		}
 	}
-	if !hasHost {
-		t.Error("ext_authz allowed_headers missing {exact: host} pattern")
+	if authzCluster == nil {
+		t.Fatal("tailvoy_ext_authz cluster not found")
+	}
+
+	// Verify HTTP/2 protocol options are present (required for gRPC)
+	opts, ok := authzCluster["typed_extension_protocol_options"].(map[string]interface{})
+	if !ok {
+		t.Fatal("ext_authz cluster missing typed_extension_protocol_options")
+	}
+
+	httpOpts, ok := opts["envoy.extensions.upstreams.http.v3.HttpProtocolOptions"].(map[string]interface{})
+	if !ok {
+		t.Fatal("missing HttpProtocolOptions in typed_extension_protocol_options")
+	}
+
+	explicitCfg, ok := httpOpts["explicit_http_config"].(map[string]interface{})
+	if !ok {
+		t.Fatal("missing explicit_http_config")
+	}
+
+	if _, ok := explicitCfg["http2_protocol_options"]; !ok {
+		t.Error("missing http2_protocol_options in explicit_http_config")
 	}
 }
 
@@ -935,7 +936,7 @@ static_resources:
 	}
 }
 
-func TestInjectExtAuthzListenerNameExtracted(t *testing.T) {
+func TestInjectExtAuthzListenerNameInContextExtensions(t *testing.T) {
 	input := `
 static_resources:
   listeners:
@@ -946,6 +947,15 @@ static_resources:
               typed_config:
                 "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
                 stat_prefix: test
+                route_config:
+                  virtual_hosts:
+                    - name: default
+                      domains: ["*"]
+                      routes:
+                        - match:
+                            prefix: /
+                          route:
+                            cluster: backend
                 http_filters:
                   - name: envoy.filters.http.router
   clusters: []
@@ -956,37 +966,6 @@ static_resources:
 		t.Fatal(err)
 	}
 
-	// The x-tailvoy-listener header should have the listener name
-	if !strings.Contains(out, "my_custom_listener") {
-		t.Error("output should contain the listener name 'my_custom_listener'")
-	}
-	if !strings.Contains(out, "x-tailvoy-listener") {
-		t.Error("output should contain x-tailvoy-listener header")
-	}
-}
-
-func TestInjectExtAuthzDefaultListenerName(t *testing.T) {
-	// Listener without a name should use "default"
-	input := `
-static_resources:
-  listeners:
-    - filter_chains:
-        - filters:
-            - name: envoy.filters.network.http_connection_manager
-              typed_config:
-                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
-                stat_prefix: test
-                http_filters:
-                  - name: envoy.filters.http.router
-  clusters: []
-`
-
-	out, err := InjectExtAuthz(input, "127.0.0.1:10000")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Should use "default" as the listener name for x-tailvoy-listener
 	var bootstrap map[string]interface{}
 	if err := yaml.Unmarshal([]byte(out), &bootstrap); err != nil {
 		t.Fatal(err)
@@ -1000,23 +979,76 @@ static_resources:
 	filters := fc["filters"].([]interface{})
 	hcm := filters[0].(map[string]interface{})
 	tc := hcm["typed_config"].(map[string]interface{})
-	httpFilters := tc["http_filters"].([]interface{})
-	authzFilter := httpFilters[0].(map[string]interface{})
-	authzTC := authzFilter["typed_config"].(map[string]interface{})
-	httpSvc := authzTC["http_service"].(map[string]interface{})
-	authzReq := httpSvc["authorization_request"].(map[string]interface{})
-	headersToAdd := authzReq["headers_to_add"].([]interface{})
+	rc := tc["route_config"].(map[string]interface{})
+	vhosts := rc["virtual_hosts"].([]interface{})
+	vh := vhosts[0].(map[string]interface{})
+	routes := vh["routes"].([]interface{})
+	route := routes[0].(map[string]interface{})
+	perFilter := route["typed_per_filter_config"].(map[string]interface{})
+	authzPerRoute := perFilter["envoy.filters.http.ext_authz"].(map[string]interface{})
+	checkSettings := authzPerRoute["check_settings"].(map[string]interface{})
+	ctxExt := checkSettings["context_extensions"].(map[string]interface{})
 
-	found := false
-	for _, raw := range headersToAdd {
-		h := raw.(map[string]interface{})
-		if h["key"] == "x-tailvoy-listener" && h["value"] == "default" {
-			found = true
-			break
-		}
+	if ctxExt["listener"] != "my_custom_listener" {
+		t.Errorf("context_extensions listener = %v, want my_custom_listener", ctxExt["listener"])
 	}
-	if !found {
-		t.Error("unnamed listener should produce x-tailvoy-listener: default")
+}
+
+func TestInjectExtAuthzDefaultListenerName(t *testing.T) {
+	// Listener without a name should use "default" in context_extensions
+	input := `
+static_resources:
+  listeners:
+    - filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: test
+                route_config:
+                  virtual_hosts:
+                    - name: default
+                      domains: ["*"]
+                      routes:
+                        - match:
+                            prefix: /
+                          route:
+                            cluster: backend
+                http_filters:
+                  - name: envoy.filters.http.router
+  clusters: []
+`
+
+	out, err := InjectExtAuthz(input, "127.0.0.1:10000")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var bootstrap map[string]interface{}
+	if err := yaml.Unmarshal([]byte(out), &bootstrap); err != nil {
+		t.Fatal(err)
+	}
+
+	sr := bootstrap["static_resources"].(map[string]interface{})
+	listeners := sr["listeners"].([]interface{})
+	l := listeners[0].(map[string]interface{})
+	fcs := l["filter_chains"].([]interface{})
+	fc := fcs[0].(map[string]interface{})
+	filters := fc["filters"].([]interface{})
+	hcm := filters[0].(map[string]interface{})
+	tc := hcm["typed_config"].(map[string]interface{})
+	rc := tc["route_config"].(map[string]interface{})
+	vhosts := rc["virtual_hosts"].([]interface{})
+	vh := vhosts[0].(map[string]interface{})
+	routes := vh["routes"].([]interface{})
+	route := routes[0].(map[string]interface{})
+	perFilter := route["typed_per_filter_config"].(map[string]interface{})
+	authzPerRoute := perFilter["envoy.filters.http.ext_authz"].(map[string]interface{})
+	checkSettings := authzPerRoute["check_settings"].(map[string]interface{})
+	ctxExt := checkSettings["context_extensions"].(map[string]interface{})
+
+	if ctxExt["listener"] != "default" {
+		t.Errorf("unnamed listener context_extensions listener = %v, want default", ctxExt["listener"])
 	}
 }
 

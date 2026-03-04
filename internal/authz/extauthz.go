@@ -4,24 +4,26 @@ import (
 	"context"
 	"log/slog"
 	"net"
-	"net/http"
 	"strings"
+
+	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	authv3 "github.com/envoyproxy/go-control-plane/envoy/service/auth/v3"
+	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
+	rpcstatus "google.golang.org/genproto/googleapis/rpc/status"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 
 	"github.com/rajsinghtech/tailvoy/internal/identity"
 	"github.com/rajsinghtech/tailvoy/internal/policy"
 )
 
-// Server implements Envoy's ext_authz HTTP service protocol.
-// It resolves Tailscale identities from source IPs and evaluates
-// L7 access policy before returning allow/deny decisions.
 type Server struct {
+	authv3.UnimplementedAuthorizationServer
 	engine   *policy.Engine
 	resolver *identity.Resolver
 	logger   *slog.Logger
 }
 
-// NewServer creates an ext_authz server backed by the given policy engine
-// and identity resolver.
 func NewServer(engine *policy.Engine, resolver *identity.Resolver, logger *slog.Logger) *Server {
 	return &Server{
 		engine:   engine,
@@ -30,88 +32,114 @@ func NewServer(engine *policy.Engine, resolver *identity.Resolver, logger *slog.
 	}
 }
 
-// ServeHTTP handles ext_authz check requests from Envoy.
-func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	srcIP := extractSourceIP(r)
+func (s *Server) Check(ctx context.Context, req *authv3.CheckRequest) (*authv3.CheckResponse, error) {
+	httpReq := req.GetAttributes().GetRequest().GetHttp()
+	headers := httpReq.GetHeaders()
+
+	srcIP := extractSourceIP(headers)
 	if srcIP == "" {
 		s.logger.Warn("ext_authz: no source IP")
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
+		return denyResponse(), nil
 	}
 
-	id, err := s.resolver.Resolve(r.Context(), srcIP)
+	id, err := s.resolver.Resolve(ctx, srcIP)
 	if err != nil {
 		s.logger.Warn("ext_authz: identity resolution failed", "ip", srcIP, "err", err)
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
+		return denyResponse(), nil
 	}
 
-	path := extractPath(r)
-	host := r.Host
-	method := r.Method
-	listener := r.Header.Get("x-tailvoy-listener")
+	path := httpReq.GetPath()
+	host := httpReq.GetHost()
+	method := httpReq.GetMethod()
+
+	listener := req.GetAttributes().GetContextExtensions()["listener"]
 	if listener == "" {
 		listener = "default"
 	}
 
 	if !s.engine.CheckL7(listener, path, host, method, id) {
 		s.logger.Info("ext_authz: denied", "ip", srcIP, "path", path, "host", host, "method", method, "listener", listener, "user", id.UserLogin, "node", id.NodeName)
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
+		return denyResponse(), nil
 	}
-
-	w.Header().Set("x-tailscale-user", id.UserLogin)
-	w.Header().Set("x-tailscale-node", id.NodeName)
-	w.Header().Set("x-tailscale-tags", strings.Join(id.Tags, ","))
-	w.Header().Set("x-tailscale-ip", id.TailscaleIP)
-	w.WriteHeader(http.StatusOK)
 
 	s.logger.Debug("ext_authz: allowed", "ip", srcIP, "path", path, "host", host, "method", method, "listener", listener, "user", id.UserLogin, "node", id.NodeName)
+	return allowResponse(id), nil
 }
 
-// ListenAndServe starts the ext_authz HTTP server on addr.
+func allowResponse(id *policy.Identity) *authv3.CheckResponse {
+	return &authv3.CheckResponse{
+		Status: &rpcstatus.Status{Code: int32(codes.OK)},
+		HttpResponse: &authv3.CheckResponse_OkResponse{
+			OkResponse: &authv3.OkHttpResponse{
+				Headers: []*corev3.HeaderValueOption{
+					header("x-tailscale-user", id.UserLogin),
+					header("x-tailscale-node", id.NodeName),
+					header("x-tailscale-tags", strings.Join(id.Tags, ",")),
+					header("x-tailscale-ip", id.TailscaleIP),
+				},
+			},
+		},
+	}
+}
+
+func denyResponse() *authv3.CheckResponse {
+	return &authv3.CheckResponse{
+		Status: &rpcstatus.Status{Code: int32(codes.PermissionDenied)},
+		HttpResponse: &authv3.CheckResponse_DeniedResponse{
+			DeniedResponse: &authv3.DeniedHttpResponse{
+				Status: &typev3.HttpStatus{Code: typev3.StatusCode_Forbidden},
+			},
+		},
+	}
+}
+
+func header(key, value string) *corev3.HeaderValueOption {
+	return &corev3.HeaderValueOption{
+		Header: &corev3.HeaderValue{
+			Key:   key,
+			Value: value,
+		},
+	}
+}
+
+// extractSourceIP returns the original client IP from Envoy-provided headers.
+// Checks x-forwarded-for first (leftmost IP), then x-envoy-external-address.
+func extractSourceIP(headers map[string]string) string {
+	if xff, ok := headers["x-forwarded-for"]; ok && xff != "" {
+		parts := strings.SplitN(xff, ",", 2)
+		ip := strings.TrimSpace(parts[0])
+		if host, _, err := net.SplitHostPort(ip); err == nil {
+			return host
+		}
+		return ip
+	}
+	if addr, ok := headers["x-envoy-external-address"]; ok && addr != "" {
+		return strings.TrimSpace(addr)
+	}
+	return ""
+}
+
+// ListenAndServe starts the gRPC ext_authz server on addr.
 // It shuts down gracefully when ctx is cancelled.
 func (s *Server) ListenAndServe(ctx context.Context, addr string) error {
-	srv := &http.Server{
-		Addr:    addr,
-		Handler: s,
+	lis, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
 	}
+
+	gs := grpc.NewServer()
+	authv3.RegisterAuthorizationServer(gs, s)
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- srv.ListenAndServe()
+		errCh <- gs.Serve(lis)
 	}()
 
 	select {
 	case err := <-errCh:
 		return err
 	case <-ctx.Done():
-		return srv.Shutdown(context.Background())
+		gs.GracefulStop()
+		return nil
 	}
-}
-
-// extractSourceIP returns the original client IP from Envoy-provided headers.
-// It checks x-forwarded-for first (leftmost IP), then x-envoy-external-address.
-func extractSourceIP(r *http.Request) string {
-	if xff := r.Header.Get("x-forwarded-for"); xff != "" {
-		parts := strings.SplitN(xff, ",", 2)
-		ip := strings.TrimSpace(parts[0])
-		// Strip port if present (unlikely in XFF but be safe).
-		if host, _, err := net.SplitHostPort(ip); err == nil {
-			return host
-		}
-		return ip
-	}
-	if addr := r.Header.Get("x-envoy-external-address"); addr != "" {
-		return strings.TrimSpace(addr)
-	}
-	return ""
-}
-
-// extractPath returns the original request path from Envoy-provided headers.
-func extractPath(r *http.Request) string {
-	if p := r.Header.Get("x-envoy-original-path"); p != "" {
-		return p
-	}
-	return r.URL.Path
 }

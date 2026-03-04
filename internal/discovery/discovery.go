@@ -17,10 +17,12 @@ import (
 
 // configDump is the top-level response from Envoy's /config_dump endpoint.
 type configDump struct {
-	Configs []configEntry `json:"configs"`
+	Configs []json.RawMessage `json:"configs"`
 }
 
-type configEntry struct {
+// listenersConfigDump represents the full ListenersConfigDump entry.
+type listenersConfigDump struct {
+	Type             string            `json:"@type"`
 	DynamicListeners []dynamicListener `json:"dynamic_listeners"`
 }
 
@@ -90,7 +92,7 @@ func New(cfg *config.DiscoveryConfig, logger *slog.Logger) (*Discoverer, error) 
 
 // Discover fetches current listeners from the Envoy admin API.
 func (d *Discoverer) Discover(ctx context.Context) ([]config.Listener, error) {
-	url := d.adminURL + "/config_dump?resource=dynamic_listeners"
+	url := d.adminURL + "/config_dump"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
@@ -120,47 +122,58 @@ func (d *Discoverer) parse(body []byte) ([]config.Listener, error) {
 		return nil, fmt.Errorf("parse config dump: %w", err)
 	}
 
-	var listeners []config.Listener
-	for _, entry := range dump.Configs {
-		for _, dl := range entry.DynamicListeners {
-			if dl.ActiveState == nil {
-				continue
-			}
-			lc := dl.ActiveState.Listener
-			sa := lc.Address.SocketAddress
-			port := sa.PortValue
-
-			// Skip admin port.
-			if port == 0 {
-				continue
-			}
-
-			name := dl.Name
-			if name == "" {
-				name = lc.Name
-			}
-
-			// Apply listener filter.
-			if d.listenerFilter != nil && !d.listenerFilter.MatchString(name) {
-				continue
-			}
-
-			protocol := "tcp"
-			if strings.EqualFold(sa.Protocol, "UDP") {
-				protocol = "udp"
-			}
-
-			l7 := d.hasHTTPConnectionManager(lc.FilterChains)
-
-			listeners = append(listeners, config.Listener{
-				Name:          name,
-				Protocol:      protocol,
-				Listen:        fmt.Sprintf(":%d", port),
-				Forward:       fmt.Sprintf("%s:%d", d.envoyAddr, port),
-				ProxyProtocol: d.proxyProtocol,
-				L7Policy:      l7,
-			})
+	var dynamicListeners []dynamicListener
+	for _, raw := range dump.Configs {
+		// Try to parse as ListenersConfigDump (full config_dump response).
+		var lcd listenersConfigDump
+		if err := json.Unmarshal(raw, &lcd); err == nil && len(lcd.DynamicListeners) > 0 {
+			dynamicListeners = append(dynamicListeners, lcd.DynamicListeners...)
+			continue
 		}
+		// Try to parse as individual DynamicListener (?resource=dynamic_listeners format).
+		var dl dynamicListener
+		if err := json.Unmarshal(raw, &dl); err == nil && dl.ActiveState != nil {
+			dynamicListeners = append(dynamicListeners, dl)
+		}
+	}
+
+	var listeners []config.Listener
+	for _, dl := range dynamicListeners {
+		if dl.ActiveState == nil {
+			continue
+		}
+		lc := dl.ActiveState.Listener
+		sa := lc.Address.SocketAddress
+		port := sa.PortValue
+
+		if port == 0 {
+			continue
+		}
+
+		name := dl.Name
+		if name == "" {
+			name = lc.Name
+		}
+
+		if d.listenerFilter != nil && !d.listenerFilter.MatchString(name) {
+			continue
+		}
+
+		protocol := "tcp"
+		if strings.EqualFold(sa.Protocol, "UDP") {
+			protocol = "udp"
+		}
+
+		l7 := d.hasHTTPConnectionManager(lc.FilterChains)
+
+		listeners = append(listeners, config.Listener{
+			Name:          name,
+			Protocol:      protocol,
+			Listen:        fmt.Sprintf(":%d", port),
+			Forward:       fmt.Sprintf("%s:%d", d.envoyAddr, port),
+			ProxyProtocol: d.proxyProtocol,
+			L7Policy:      l7,
+		})
 	}
 
 	sort.Slice(listeners, func(i, j int) bool {
@@ -214,9 +227,10 @@ func (d *Discoverer) Watch(ctx context.Context) <-chan []config.Listener {
 					d.logger.Error("discovery poll failed", "err", err)
 					continue
 				}
+				d.logger.Debug("discovery poll completed", "count", len(listeners))
 				if !listenersEqual(prev, listeners) {
 					d.logger.Info("discovered listener change",
-						"count", len(listeners))
+						"prev", len(prev), "new", len(listeners))
 					prev = listeners
 					select {
 					case ch <- listeners:

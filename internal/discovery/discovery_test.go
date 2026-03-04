@@ -300,6 +300,43 @@ func TestWatch_SendsOnChange(t *testing.T) {
 	}
 }
 
+func TestDiscover_FullConfigDumpWithOtherEntries(t *testing.T) {
+	// Simulate a real /config_dump response with clusters, routes, and listeners.
+	fullDump := `{
+		"configs": [
+			{"@type": "type.googleapis.com/envoy.admin.v3.BootstrapConfigDump"},
+			{"@type": "type.googleapis.com/envoy.admin.v3.ClustersConfigDump", "dynamic_active_clusters": []},
+			{"@type": "type.googleapis.com/envoy.admin.v3.ListenersConfigDump", "dynamic_listeners": [
+				{"name": "default/eg/http", "active_state": {"listener": {"name": "default/eg/http", "address": {"socket_address": {"address": "0.0.0.0", "port_value": 8080}}, "filter_chains": [{"filters": [{"name": "envoy.filters.network.http_connection_manager"}]}]}}}
+			]},
+			{"@type": "type.googleapis.com/envoy.admin.v3.RoutesConfigDump"}
+		]
+	}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(fullDump))
+	}))
+	defer srv.Close()
+
+	d, err := New(&config.DiscoveryConfig{
+		EnvoyAdmin:   srv.URL,
+		EnvoyAddress: "127.0.0.1",
+	}, testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	listeners, err := d.Discover(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listeners) != 1 {
+		t.Fatalf("got %d listeners, want 1", len(listeners))
+	}
+	if listeners[0].Name != "default/eg/http" {
+		t.Errorf("name = %q", listeners[0].Name)
+	}
+}
+
 func TestListenersEqual(t *testing.T) {
 	a := []config.Listener{{Name: "x", Listen: ":80"}}
 	b := []config.Listener{{Name: "x", Listen: ":80"}}

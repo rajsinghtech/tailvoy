@@ -47,13 +47,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	path := extractPath(r)
+	host := r.Host
+	method := r.Method
 	listener := r.Header.Get("x-tailvoy-listener")
 	if listener == "" {
 		listener = "default"
 	}
 
-	if !s.engine.CheckL7(listener, path, id) {
-		s.logger.Info("ext_authz: denied", "ip", srcIP, "path", path, "listener", listener, "user", id.UserLogin, "node", id.NodeName)
+	if !s.engine.CheckL7(listener, path, host, method, id) {
+		s.logger.Info("ext_authz: denied", "ip", srcIP, "path", path, "host", host, "method", method, "listener", listener, "user", id.UserLogin, "node", id.NodeName)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -64,7 +66,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("x-tailscale-ip", id.TailscaleIP)
 	w.WriteHeader(http.StatusOK)
 
-	s.logger.Debug("ext_authz: allowed", "ip", srcIP, "path", path, "listener", listener, "user", id.UserLogin, "node", id.NodeName)
+	s.logger.Debug("ext_authz: allowed", "ip", srcIP, "path", path, "host", host, "method", method, "listener", listener, "user", id.UserLogin, "node", id.NodeName)
 }
 
 // ListenAndServe starts the ext_authz HTTP server on addr.

@@ -300,6 +300,7 @@ func buildExtAuthzFilter(listenerName string) map[string]interface{} {
 						"patterns": []interface{}{
 							map[string]interface{}{"exact": "x-forwarded-for"},
 							map[string]interface{}{"exact": "x-envoy-external-address"},
+							map[string]interface{}{"exact": "host"},
 							map[string]interface{}{"prefix": "x-tailvoy-"},
 						},
 					},

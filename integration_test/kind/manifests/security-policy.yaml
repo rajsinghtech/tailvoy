@@ -1,0 +1,24 @@
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata:
+  name: ext-authz
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: backend-route
+  extAuth:
+    http:
+      backendRefs:
+        - name: tailvoy-authz
+          port: 9001
+      headersToExtAuth:
+        - x-forwarded-for
+        - x-envoy-external-address
+        - x-envoy-original-path
+        - host
+      headersToBackend:
+        - x-tailscale-user
+        - x-tailscale-node
+        - x-tailscale-tags
+        - x-tailscale-ip

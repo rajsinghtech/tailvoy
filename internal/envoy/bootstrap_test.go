@@ -459,6 +459,54 @@ func TestGenerateStandaloneConfigHTTPListenerHasExtAuthzHTTPFilter(t *testing.T)
 	}
 }
 
+func TestGenerateStandaloneConfigExtAuthzForwardsHostHeader(t *testing.T) {
+	cfg := &config.Config{
+		Tailscale: config.TailscaleConfig{Hostname: "test"},
+		Listeners: []config.Listener{
+			{Name: "web", Protocol: "tcp", Listen: ":80", Forward: "127.0.0.1:8080", L7Policy: true},
+		},
+		Default: "deny",
+	}
+
+	result, err := GenerateStandaloneConfig(cfg, "127.0.0.1:10000")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var bootstrap map[string]interface{}
+	if err := yaml.Unmarshal([]byte(result.BootstrapYAML), &bootstrap); err != nil {
+		t.Fatal(err)
+	}
+
+	sr := bootstrap["static_resources"].(map[string]interface{})
+	listeners := sr["listeners"].([]interface{})
+	l := listeners[0].(map[string]interface{})
+	fcs := l["filter_chains"].([]interface{})
+	fc := fcs[0].(map[string]interface{})
+	filters := fc["filters"].([]interface{})
+	hcm := filters[0].(map[string]interface{})
+	tc := hcm["typed_config"].(map[string]interface{})
+	httpFilters := tc["http_filters"].([]interface{})
+	authzFilter := httpFilters[0].(map[string]interface{})
+	authzTC := authzFilter["typed_config"].(map[string]interface{})
+	httpSvc := authzTC["http_service"].(map[string]interface{})
+	authzReq := httpSvc["authorization_request"].(map[string]interface{})
+	allowedHeaders := authzReq["allowed_headers"].(map[string]interface{})
+	patterns := allowedHeaders["patterns"].([]interface{})
+
+	hasHost := false
+	for _, raw := range patterns {
+		p := raw.(map[string]interface{})
+		if v, ok := p["exact"]; ok && v == "host" {
+			hasHost = true
+			break
+		}
+	}
+	if !hasHost {
+		t.Error("ext_authz allowed_headers missing {exact: host} pattern")
+	}
+}
+
 func TestGenerateStandaloneConfigYAMLRoundTrip(t *testing.T) {
 	cfg := &config.Config{
 		Tailscale: config.TailscaleConfig{Hostname: "test"},

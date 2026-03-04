@@ -543,6 +543,153 @@ func TestGracefulShutdownWhileRequestInFlight(t *testing.T) {
 	}
 }
 
+func TestHostBasedRouting(t *testing.T) {
+	cfg := &config.Config{
+		Tailscale: config.TailscaleConfig{Hostname: "test"},
+		Listeners: []config.Listener{{
+			Name: "default", Protocol: "tcp", Listen: ":443", Forward: "localhost:8080",
+		}},
+		L7Rules: []config.Rule{
+			{
+				Match: config.RuleMatch{Listener: "default", Path: "/*", Host: "admin.example.com"},
+				Allow: config.AllowSpec{Users: []string{"admin@example.com"}},
+			},
+			{
+				Match: config.RuleMatch{Listener: "default", Path: "/*"},
+				Allow: config.AllowSpec{AnyTailscale: true},
+			},
+		},
+		Default: "deny",
+	}
+
+	srv := testServer(t, cfg, map[string]*apitype.WhoIsResponse{
+		"100.64.1.1": aliceResp,
+		"100.64.2.2": adminResp,
+	})
+
+	// alice hitting the admin host -> 403 (host matches rule 1, alice not in allow list)
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Host = "admin.example.com"
+	req.Header.Set("x-forwarded-for", "100.64.1.1")
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("alice on admin host: expected 403, got %d", rec.Code)
+	}
+
+	// admin hitting the admin host -> 200
+	req2 := httptest.NewRequest(http.MethodGet, "/", nil)
+	req2.Host = "admin.example.com"
+	req2.Header.Set("x-forwarded-for", "100.64.2.2")
+	rec2 := httptest.NewRecorder()
+	srv.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("admin on admin host: expected 200, got %d", rec2.Code)
+	}
+
+	// alice hitting a different host -> 200 (falls through to catch-all)
+	req3 := httptest.NewRequest(http.MethodGet, "/", nil)
+	req3.Host = "public.example.com"
+	req3.Header.Set("x-forwarded-for", "100.64.1.1")
+	rec3 := httptest.NewRecorder()
+	srv.ServeHTTP(rec3, req3)
+	if rec3.Code != http.StatusOK {
+		t.Fatalf("alice on public host: expected 200, got %d", rec3.Code)
+	}
+}
+
+func TestMethodBasedRouting(t *testing.T) {
+	cfg := &config.Config{
+		Tailscale: config.TailscaleConfig{Hostname: "test"},
+		Listeners: []config.Listener{{
+			Name: "default", Protocol: "tcp", Listen: ":443", Forward: "localhost:8080",
+		}},
+		L7Rules: []config.Rule{
+			{
+				Match: config.RuleMatch{Listener: "default", Path: "/*", Methods: []string{"GET", "HEAD"}},
+				Allow: config.AllowSpec{AnyTailscale: true},
+			},
+		},
+		Default: "deny",
+	}
+
+	srv := testServer(t, cfg, map[string]*apitype.WhoIsResponse{
+		"100.64.1.1": aliceResp,
+	})
+
+	// GET should be allowed
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("x-forwarded-for", "100.64.1.1")
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("alice GET: expected 200, got %d", rec.Code)
+	}
+
+	// POST should be denied (no matching rule, default deny)
+	req2 := httptest.NewRequest(http.MethodPost, "/", nil)
+	req2.Header.Set("x-forwarded-for", "100.64.1.1")
+	rec2 := httptest.NewRecorder()
+	srv.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusForbidden {
+		t.Fatalf("alice POST: expected 403, got %d", rec2.Code)
+	}
+}
+
+func TestHostAndMethodCombined(t *testing.T) {
+	cfg := &config.Config{
+		Tailscale: config.TailscaleConfig{Hostname: "test"},
+		Listeners: []config.Listener{{
+			Name: "default", Protocol: "tcp", Listen: ":443", Forward: "localhost:8080",
+		}},
+		L7Rules: []config.Rule{
+			{
+				Match: config.RuleMatch{Listener: "default", Path: "/api/*", Host: "api.example.com", Methods: []string{"GET"}},
+				Allow: config.AllowSpec{AnyTailscale: true},
+			},
+			{
+				Match: config.RuleMatch{Listener: "default", Path: "/*"},
+				Allow: config.AllowSpec{AnyTailscale: true},
+			},
+		},
+		Default: "deny",
+	}
+
+	srv := testServer(t, cfg, map[string]*apitype.WhoIsResponse{
+		"100.64.1.1": aliceResp,
+	})
+
+	// GET /api/data on api.example.com -> 200 (matches rule 1)
+	req := httptest.NewRequest(http.MethodGet, "/api/data", nil)
+	req.Host = "api.example.com"
+	req.Header.Set("x-forwarded-for", "100.64.1.1")
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/data api.example.com: expected 200, got %d", rec.Code)
+	}
+
+	// POST /api/data on api.example.com -> 200 (method doesn't match rule 1, falls to catch-all)
+	req2 := httptest.NewRequest(http.MethodPost, "/api/data", nil)
+	req2.Host = "api.example.com"
+	req2.Header.Set("x-forwarded-for", "100.64.1.1")
+	rec2 := httptest.NewRecorder()
+	srv.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("POST /api/data api.example.com: expected 200, got %d", rec2.Code)
+	}
+
+	// GET /api/data on other.com -> 200 (host doesn't match rule 1, falls to catch-all)
+	req3 := httptest.NewRequest(http.MethodGet, "/api/data", nil)
+	req3.Host = "other.com"
+	req3.Header.Set("x-forwarded-for", "100.64.1.1")
+	rec3 := httptest.NewRecorder()
+	srv.ServeHTTP(rec3, req3)
+	if rec3.Code != http.StatusOK {
+		t.Fatalf("GET /api/data other.com: expected 200, got %d", rec3.Code)
+	}
+}
+
 func TestTaggedNodeHeaders(t *testing.T) {
 	taggedResp := &apitype.WhoIsResponse{
 		Node: &tailcfg.Node{

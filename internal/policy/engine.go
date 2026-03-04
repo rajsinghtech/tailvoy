@@ -44,10 +44,10 @@ func (e *Engine) CheckL4(listenerName string, id *Identity) bool {
 	return cfg.Default == "allow"
 }
 
-// CheckL7 evaluates L7 rules for the given listener and request path against the
-// caller identity. First matching rule wins. Falls through to the default policy
-// if no rule matches.
-func (e *Engine) CheckL7(listenerName, reqPath string, id *Identity) bool {
+// CheckL7 evaluates L7 rules for the given listener, request path, host, and
+// method against the caller identity. First matching rule wins. Falls through
+// to the default policy if no rule matches.
+func (e *Engine) CheckL7(listenerName, reqPath, reqHost, reqMethod string, id *Identity) bool {
 	e.mu.RLock()
 	cfg := e.config
 	e.mu.RUnlock()
@@ -59,10 +59,16 @@ func (e *Engine) CheckL7(listenerName, reqPath string, id *Identity) bool {
 		if !matchPath(rule.Match.Path, reqPath) {
 			continue
 		}
+		if !matchHost(rule.Match.Host, reqHost) {
+			continue
+		}
+		if !matchMethod(rule.Match.Methods, reqMethod) {
+			continue
+		}
 		if matchesAllow(&rule.Allow, id) {
 			return true
 		}
-		// Path matched but identity didn't — first match wins, deny.
+		// Rule matched but identity didn't — first match wins, deny.
 		return cfg.Default == "allow"
 	}
 
@@ -100,6 +106,42 @@ func matchesAllow(allow *config.AllowSpec, id *Identity) bool {
 		}
 	}
 
+	return false
+}
+
+// matchHost checks whether reqHost matches the given pattern.
+// Empty pattern matches all hosts. Supports exact match (case-insensitive)
+// and wildcard *.domain suffix match. Ports are stripped from reqHost.
+func matchHost(pattern, reqHost string) bool {
+	if pattern == "" {
+		return true
+	}
+	// Strip port from reqHost if present.
+	if i := strings.LastIndex(reqHost, ":"); i >= 0 {
+		// Avoid stripping from IPv6 addresses without brackets.
+		if strings.Contains(reqHost, "]") || !strings.Contains(reqHost, ":") || i == strings.LastIndex(reqHost, ":") {
+			reqHost = reqHost[:i]
+		}
+	}
+	if strings.HasPrefix(pattern, "*.") {
+		suffix := pattern[1:] // e.g. ".example.com"
+		return strings.HasSuffix(strings.ToLower(reqHost), strings.ToLower(suffix))
+	}
+	return strings.EqualFold(pattern, reqHost)
+}
+
+// matchMethod checks whether reqMethod is in the allowed methods list.
+// Empty/nil list matches all methods.
+func matchMethod(methods []string, reqMethod string) bool {
+	if len(methods) == 0 {
+		return true
+	}
+	upper := strings.ToUpper(reqMethod)
+	for _, m := range methods {
+		if m == upper {
+			return true
+		}
+	}
 	return false
 }
 

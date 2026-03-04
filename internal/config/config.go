@@ -38,8 +38,10 @@ type Rule struct {
 }
 
 type RuleMatch struct {
-	Listener string `yaml:"listener"`
-	Path     string `yaml:"path"`
+	Listener string   `yaml:"listener"`
+	Path     string   `yaml:"path"`
+	Host     string   `yaml:"host"`
+	Methods  []string `yaml:"methods"`
 }
 
 type AllowSpec struct {
@@ -127,6 +129,14 @@ func (c *Config) validate() error {
 		}
 		if r.Match.Path == "" {
 			return fmt.Errorf("l7_rules[%d].match.path is required", i)
+		}
+		if h := r.Match.Host; h != "" && strings.Contains(h, "*") {
+			if !strings.HasPrefix(h, "*.") || strings.Count(h, "*") > 1 {
+				return fmt.Errorf("l7_rules[%d].match.host wildcard must be *.domain form, got %q", i, h)
+			}
+		}
+		for j, m := range r.Match.Methods {
+			c.L7Rules[i].Match.Methods[j] = strings.ToUpper(m)
 		}
 	}
 

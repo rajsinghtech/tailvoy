@@ -175,6 +175,22 @@ assert_http "L7: /admin/settings deny" "http://$IP:80/admin/settings" "403"
 assert_http "L7: /admin/users deny" "http://$IP:80/admin/users" "403"
 assert_http "L7: /admin/ deny" "http://$IP:80/admin/" "403"
 
+# Host-based routing: /host-test/* restricted to admin.tailvoy.test
+# Correct host header should allow (user matches)
+HTTP=$(curl -sf -o /dev/null -w "%{http_code}" -H "Host: admin.tailvoy.test" --max-time 10 "http://$IP:80/host-test/page" 2>&1 || true)
+if [ "$HTTP" = "200" ]; then test_pass "L7: /host-test with matching host"; else test_fail "L7: /host-test with matching host" "got $HTTP"; fi
+
+# Wrong host header should fall through to default deny (no catch-all for /host-test/*)
+HTTP=$(curl -sf -o /dev/null -w "%{http_code}" -H "Host: other.tailvoy.test" --max-time 10 "http://$IP:80/host-test/page" 2>&1 || true)
+if [ "$HTTP" = "403" ]; then test_pass "L7: /host-test with wrong host deny"; else test_fail "L7: /host-test with wrong host deny" "got $HTTP"; fi
+
+# Method-based routing: /readonly/* allows only GET/HEAD
+assert_http "L7: GET /readonly/data allow" "http://$IP:80/readonly/data" "200"
+HTTP=$(curl -sf -o /dev/null -w "%{http_code}" -X POST --max-time 10 "http://$IP:80/readonly/data" 2>&1 || true)
+if [ "$HTTP" = "403" ]; then test_pass "L7: POST /readonly/data deny"; else test_fail "L7: POST /readonly/data deny" "got $HTTP"; fi
+HTTP=$(curl -sf -o /dev/null -w "%{http_code}" -X HEAD --max-time 10 "http://$IP:80/readonly/data" 2>&1 || true)
+if [ "$HTTP" = "200" ] || [ "$HTTP" = "204" ]; then test_pass "L7: HEAD /readonly/data allow"; else test_fail "L7: HEAD /readonly/data allow" "got $HTTP"; fi
+
 # Unmatched paths - default:deny
 assert_http "L7: /unknown deny (default)" "http://$IP:80/unknown" "403"
 assert_http "L7: /foo/bar deny (default)" "http://$IP:80/foo/bar" "403"

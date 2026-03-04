@@ -214,6 +214,46 @@ listeners:
 `,
 			want: "forward is required",
 		},
+		{
+			name: "invalid host wildcard - middle",
+			yaml: `
+tailscale:
+  hostname: test
+listeners:
+  - name: web
+    protocol: tcp
+    listen: ":80"
+    forward: "localhost:80"
+l7_rules:
+  - match:
+      listener: web
+      path: "/*"
+      host: "foo.*.bar"
+    allow:
+      any_tailscale: true
+`,
+			want: "wildcard must be *.domain form",
+		},
+		{
+			name: "invalid host wildcard - multiple stars",
+			yaml: `
+tailscale:
+  hostname: test
+listeners:
+  - name: web
+    protocol: tcp
+    listen: ":80"
+    forward: "localhost:80"
+l7_rules:
+  - match:
+      listener: web
+      path: "/*"
+      host: "**.example.com"
+    allow:
+      any_tailscale: true
+`,
+			want: "wildcard must be *.domain form",
+		},
 	}
 
 	for _, tt := range tests {
@@ -554,6 +594,127 @@ listeners:
 	}
 	if cfg.Tailscale.AuthKey != "${}" {
 		t.Errorf("authkey = %q, want %q (literal, not expanded)", cfg.Tailscale.AuthKey, "${}")
+	}
+}
+
+func TestParse_HostAndMethodsParsing(t *testing.T) {
+	data := []byte(`
+tailscale:
+  hostname: test
+listeners:
+  - name: web
+    protocol: tcp
+    listen: ":80"
+    forward: "localhost:80"
+l7_rules:
+  - match:
+      listener: web
+      path: "/*"
+      host: "*.example.com"
+      methods: ["get", "post"]
+    allow:
+      any_tailscale: true
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := cfg.L7Rules[0].Match.Host; got != "*.example.com" {
+		t.Errorf("host = %q, want %q", got, "*.example.com")
+	}
+	wantMethods := []string{"GET", "POST"}
+	gotMethods := cfg.L7Rules[0].Match.Methods
+	if len(gotMethods) != len(wantMethods) {
+		t.Fatalf("methods len = %d, want %d", len(gotMethods), len(wantMethods))
+	}
+	for i := range wantMethods {
+		if gotMethods[i] != wantMethods[i] {
+			t.Errorf("methods[%d] = %q, want %q", i, gotMethods[i], wantMethods[i])
+		}
+	}
+}
+
+func TestParse_BackwardCompat_NoHostMethods(t *testing.T) {
+	data := []byte(`
+tailscale:
+  hostname: test
+listeners:
+  - name: web
+    protocol: tcp
+    listen: ":80"
+    forward: "localhost:80"
+l7_rules:
+  - match:
+      listener: web
+      path: "/*"
+    allow:
+      any_tailscale: true
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := cfg.L7Rules[0].Match.Host; got != "" {
+		t.Errorf("host = %q, want empty string", got)
+	}
+	if got := cfg.L7Rules[0].Match.Methods; len(got) != 0 {
+		t.Errorf("methods = %v, want nil or empty", got)
+	}
+}
+
+func TestParse_ValidHostWildcard(t *testing.T) {
+	data := []byte(`
+tailscale:
+  hostname: test
+listeners:
+  - name: web
+    protocol: tcp
+    listen: ":80"
+    forward: "localhost:80"
+l7_rules:
+  - match:
+      listener: web
+      path: "/*"
+      host: "*.example.com"
+    allow:
+      any_tailscale: true
+`)
+	_, err := Parse(data)
+	if err != nil {
+		t.Fatalf("expected no error for valid wildcard host, got: %v", err)
+	}
+}
+
+func TestParse_MethodNormalization(t *testing.T) {
+	data := []byte(`
+tailscale:
+  hostname: test
+listeners:
+  - name: web
+    protocol: tcp
+    listen: ":80"
+    forward: "localhost:80"
+l7_rules:
+  - match:
+      listener: web
+      path: "/*"
+      methods: ["get", "Post", "DELETE"]
+    allow:
+      any_tailscale: true
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	wantMethods := []string{"GET", "POST", "DELETE"}
+	gotMethods := cfg.L7Rules[0].Match.Methods
+	if len(gotMethods) != len(wantMethods) {
+		t.Fatalf("methods len = %d, want %d", len(gotMethods), len(wantMethods))
+	}
+	for i := range wantMethods {
+		if gotMethods[i] != wantMethods[i] {
+			t.Errorf("methods[%d] = %q, want %q", i, gotMethods[i], wantMethods[i])
+		}
 	}
 }
 

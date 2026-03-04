@@ -73,6 +73,22 @@ l7_rules:
     allow:
       tags: ["tag:admin-only"]
 
+  # Host-restricted: admin.tailvoy.test only for specific user
+  - match:
+      listener: http
+      path: "/host-test/*"
+      host: "admin.tailvoy.test"
+    allow:
+      users: ["rajsinghtech@github"]
+
+  # Method-restricted: read-only GET/HEAD on /readonly/*
+  - match:
+      listener: http
+      path: "/readonly/*"
+      methods: ["GET", "HEAD"]
+    allow:
+      any_tailscale: true
+
   # API path - specific user only
   - match:
       listener: http

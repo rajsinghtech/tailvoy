@@ -129,12 +129,12 @@ func TestCheckL7_AdminPathByUser(t *testing.T) {
 	e := NewEngine(cfg)
 
 	alice := &Identity{UserLogin: "alice@company.com", TailscaleIP: "100.64.0.10"}
-	if !e.CheckL7("web", "/admin/settings", alice) {
+	if !e.CheckL7("web", "/admin/settings", "", "", alice) {
 		t.Error("expected L7 allow for alice on /admin/settings")
 	}
 
 	bob := &Identity{UserLogin: "bob@company.com", TailscaleIP: "100.64.0.11"}
-	if e.CheckL7("web", "/admin/settings", bob) {
+	if e.CheckL7("web", "/admin/settings", "", "", bob) {
 		t.Error("expected L7 deny for bob on /admin/settings")
 	}
 }
@@ -150,12 +150,12 @@ func TestCheckL7_APIPathByTag(t *testing.T) {
 	e := NewEngine(cfg)
 
 	client := &Identity{Tags: []string{"tag:api-client"}, IsTagged: true, TailscaleIP: "100.64.0.12"}
-	if !e.CheckL7("web", "/api/v1/data", client) {
+	if !e.CheckL7("web", "/api/v1/data", "", "", client) {
 		t.Error("expected L7 allow for tagged node on /api/v1/data")
 	}
 
 	rando := &Identity{UserLogin: "rando@example.com", TailscaleIP: "100.64.0.13"}
-	if e.CheckL7("web", "/api/v1/data", rando) {
+	if e.CheckL7("web", "/api/v1/data", "", "", rando) {
 		t.Error("expected L7 deny for untagged user on /api/v1/data")
 	}
 }
@@ -178,12 +178,12 @@ func TestCheckL7_CatchAll(t *testing.T) {
 
 	// Random user should hit the catch-all.
 	id := &Identity{UserLogin: "bob@company.com", TailscaleIP: "100.64.0.14"}
-	if !e.CheckL7("web", "/public/page", id) {
+	if !e.CheckL7("web", "/public/page", "", "", id) {
 		t.Error("expected L7 allow on catch-all for /public/page")
 	}
 
 	// Admin path should be restricted (first-match wins).
-	if e.CheckL7("web", "/admin/secret", id) {
+	if e.CheckL7("web", "/admin/secret", "", "", id) {
 		t.Error("expected L7 deny for bob on /admin/secret (first-match rule)")
 	}
 }
@@ -200,7 +200,7 @@ func TestCheckL7_DefaultDeny(t *testing.T) {
 
 	// Path that matches no rule at all.
 	id := &Identity{UserLogin: "someone@example.com", TailscaleIP: "100.64.0.15"}
-	if e.CheckL7("web", "/unknown", id) {
+	if e.CheckL7("web", "/unknown", "", "", id) {
 		t.Error("expected L7 deny for path with no matching rule")
 	}
 }
@@ -216,7 +216,7 @@ func TestCheckL7_WrongListener(t *testing.T) {
 	e := NewEngine(cfg)
 
 	id := &Identity{UserLogin: "someone@example.com", TailscaleIP: "100.64.0.16"}
-	if e.CheckL7("db", "/anything", id) {
+	if e.CheckL7("db", "/anything", "", "", id) {
 		t.Error("expected L7 deny when no rules match the listener")
 	}
 }
@@ -548,14 +548,14 @@ func TestCheckL7_NoL7Rules(t *testing.T) {
 	eDeny := NewEngine(cfgDeny)
 
 	id := &Identity{UserLogin: "someone@example.com"}
-	if eDeny.CheckL7("web", "/anything", id) {
+	if eDeny.CheckL7("web", "/anything", "", "", id) {
 		t.Error("expected deny when no L7 rules and default=deny")
 	}
 
 	cfgAllow := testConfig(nil, nil, "allow")
 	eAllow := NewEngine(cfgAllow)
 
-	if !eAllow.CheckL7("web", "/anything", id) {
+	if !eAllow.CheckL7("web", "/anything", "", "", id) {
 		t.Error("expected allow when no L7 rules and default=allow")
 	}
 }
@@ -581,7 +581,7 @@ func TestCheckL7_ManyRules(t *testing.T) {
 	id := &Identity{UserLogin: "someone@example.com"}
 
 	start := time.Now()
-	if !e.CheckL7("web", "/unmatched-path", id) {
+	if !e.CheckL7("web", "/unmatched-path", "", "", id) {
 		t.Error("expected allow via catch-all after 200 non-matching rules")
 	}
 	elapsed := time.Since(start)
@@ -610,13 +610,13 @@ func TestCheckL7_FirstMatchWins_MultiplePathRules(t *testing.T) {
 
 	// Admin tag matches rule 0.
 	admin := &Identity{Tags: []string{"tag:admin"}, IsTagged: true}
-	if !e.CheckL7("web", "/data/secret", admin) {
+	if !e.CheckL7("web", "/data/secret", "", "", admin) {
 		t.Error("expected allow for admin on /data/secret")
 	}
 
 	// Non-admin: rule 0 path matches but identity doesn't — first match wins, deny.
 	user := &Identity{UserLogin: "user@example.com"}
-	if e.CheckL7("web", "/data/secret", user) {
+	if e.CheckL7("web", "/data/secret", "", "", user) {
 		t.Error("expected deny for non-admin on /data/secret (first-match-wins)")
 	}
 }
@@ -632,17 +632,17 @@ func TestCheckL7_GroupsMatching(t *testing.T) {
 	e := NewEngine(cfg)
 
 	eng := &Identity{Tags: []string{"group:engineering"}, IsTagged: true}
-	if !e.CheckL7("web", "/internal/dashboard", eng) {
+	if !e.CheckL7("web", "/internal/dashboard", "", "", eng) {
 		t.Error("expected allow for group:engineering")
 	}
 
 	ops := &Identity{Tags: []string{"group:ops"}, IsTagged: true}
-	if !e.CheckL7("web", "/internal/dashboard", ops) {
+	if !e.CheckL7("web", "/internal/dashboard", "", "", ops) {
 		t.Error("expected allow for group:ops")
 	}
 
 	sales := &Identity{Tags: []string{"group:sales"}, IsTagged: true}
-	if e.CheckL7("web", "/internal/dashboard", sales) {
+	if e.CheckL7("web", "/internal/dashboard", "", "", sales) {
 		t.Error("expected deny for group:sales")
 	}
 }
@@ -658,7 +658,7 @@ func TestCheckL7_EmptyAllowSpec(t *testing.T) {
 	e := NewEngine(cfg)
 
 	id := &Identity{UserLogin: "someone@example.com", Tags: []string{"tag:foo"}}
-	if e.CheckL7("web", "/anything", id) {
+	if e.CheckL7("web", "/anything", "", "", id) {
 		t.Error("expected deny for empty allow spec")
 	}
 }
@@ -674,7 +674,7 @@ func TestCheckL7_PathWithQueryString(t *testing.T) {
 	e := NewEngine(cfg)
 
 	id := &Identity{UserLogin: "user@example.com"}
-	if !e.CheckL7("web", "/public/page?foo=bar&baz=1", id) {
+	if !e.CheckL7("web", "/public/page?foo=bar&baz=1", "", "", id) {
 		t.Error("expected path with query string to match /public/* prefix")
 	}
 }
@@ -697,7 +697,7 @@ func TestCheckL7_PathDotSegments(t *testing.T) {
 
 	// Path traversal string — no normalization means it matches /public/* literally.
 	id := &Identity{UserLogin: "sneaky@example.com"}
-	if !e.CheckL7("web", "/public/../admin/secret", id) {
+	if !e.CheckL7("web", "/public/../admin/secret", "", "", id) {
 		t.Error("expected match on /public/* for literal dot-segment path (no normalization)")
 	}
 }
@@ -714,7 +714,7 @@ func TestCheckL7_VeryLongPath(t *testing.T) {
 
 	longPath := "/" + strings.Repeat("segment/", 200)
 	id := &Identity{UserLogin: "user@example.com"}
-	if !e.CheckL7("web", longPath, id) {
+	if !e.CheckL7("web", longPath, "", "", id) {
 		t.Error("expected allow for very long path under catch-all")
 	}
 }
@@ -756,7 +756,7 @@ func TestReload_ConcurrentAccess(t *testing.T) {
 					return
 				default:
 					e.CheckL4("web", id)
-					e.CheckL7("web", "/test", id)
+					e.CheckL7("web", "/test", "", "", id)
 				}
 			}
 		}()
@@ -786,4 +786,182 @@ func TestReload_ConcurrentAccess(t *testing.T) {
 
 	wg.Wait()
 	// If the race detector doesn't fire, the concurrent access is safe.
+}
+
+// ---------------------------------------------------------------------------
+// Host matching
+// ---------------------------------------------------------------------------
+
+func TestMatchHost(t *testing.T) {
+	tests := []struct {
+		pattern string
+		host    string
+		want    bool
+	}{
+		// Empty pattern matches any host.
+		{"", "anything.com", true},
+		{"", "", true},
+
+		// Exact match (case insensitive).
+		{"exact.com", "exact.com", true},
+		{"exact.com", "EXACT.COM", true},
+		{"exact.com", "other.com", false},
+
+		// Port is stripped from host.
+		{"exact.com", "exact.com:8080", true},
+
+		// Wildcard suffix.
+		{"*.example.com", "sub.example.com", true},
+		{"*.example.com", "deep.sub.example.com", true},
+		{"*.example.com", "example.com", false},
+		{"*.example.com", "other.com", false},
+		{"*.example.com", "SUB.EXAMPLE.COM", true},
+	}
+
+	for _, tt := range tests {
+		got := matchHost(tt.pattern, tt.host)
+		if got != tt.want {
+			t.Errorf("matchHost(%q, %q) = %v, want %v", tt.pattern, tt.host, got, tt.want)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Method matching
+// ---------------------------------------------------------------------------
+
+func TestMatchMethod(t *testing.T) {
+	tests := []struct {
+		methods []string
+		method  string
+		want    bool
+	}{
+		// nil matches any method.
+		{nil, "GET", true},
+		{nil, "POST", true},
+
+		// Empty slice matches any method.
+		{[]string{}, "DELETE", true},
+
+		// Single method match.
+		{[]string{"GET"}, "GET", true},
+		{[]string{"GET"}, "get", true}, // case insensitive
+
+		// Multiple methods.
+		{[]string{"GET", "POST"}, "POST", true},
+
+		// No match.
+		{[]string{"GET"}, "DELETE", false},
+	}
+
+	for _, tt := range tests {
+		got := matchMethod(tt.methods, tt.method)
+		if got != tt.want {
+			t.Errorf("matchMethod(%v, %q) = %v, want %v", tt.methods, tt.method, got, tt.want)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// CheckL7 with host matching
+// ---------------------------------------------------------------------------
+
+func TestCheckL7_HostMatching(t *testing.T) {
+	cfg := testConfig(nil,
+		[]config.Rule{
+			{
+				// Only alice on admin.example.com.
+				Match: config.RuleMatch{Listener: "web", Path: "/*", Host: "admin.example.com"},
+				Allow: config.AllowSpec{Users: []string{"alice@company.com"}},
+			},
+			{
+				// Catch-all: any tailscale user on any host.
+				Match: config.RuleMatch{Listener: "web", Path: "/*"},
+				Allow: config.AllowSpec{AnyTailscale: true},
+			},
+		},
+		"deny",
+	)
+	e := NewEngine(cfg)
+
+	alice := &Identity{UserLogin: "alice@company.com"}
+	if !e.CheckL7("web", "/", "admin.example.com", "", alice) {
+		t.Error("expected allow for alice on admin.example.com")
+	}
+
+	bob := &Identity{UserLogin: "bob@company.com"}
+	if e.CheckL7("web", "/", "admin.example.com", "", bob) {
+		t.Error("expected deny for bob on admin.example.com (first-match-wins)")
+	}
+
+	if !e.CheckL7("web", "/", "other.example.com", "", bob) {
+		t.Error("expected allow for bob on other.example.com (falls through to catch-all)")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// CheckL7 with method matching
+// ---------------------------------------------------------------------------
+
+func TestCheckL7_MethodMatching(t *testing.T) {
+	cfg := testConfig(nil,
+		[]config.Rule{{
+			Match: config.RuleMatch{Listener: "web", Path: "/*", Methods: []string{"GET", "HEAD"}},
+			Allow: config.AllowSpec{AnyTailscale: true},
+		}},
+		"deny",
+	)
+	e := NewEngine(cfg)
+
+	id := &Identity{UserLogin: "user@example.com"}
+
+	if !e.CheckL7("web", "/page", "", "GET", id) {
+		t.Error("expected allow for GET")
+	}
+	if !e.CheckL7("web", "/page", "", "HEAD", id) {
+		t.Error("expected allow for HEAD")
+	}
+	if e.CheckL7("web", "/page", "", "POST", id) {
+		t.Error("expected deny for POST (falls through to default deny)")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// CheckL7 with host + method combined
+// ---------------------------------------------------------------------------
+
+func TestCheckL7_HostAndMethodCombined(t *testing.T) {
+	cfg := testConfig(nil,
+		[]config.Rule{
+			{
+				// GET only on api.example.com.
+				Match: config.RuleMatch{Listener: "web", Path: "/*", Host: "api.example.com", Methods: []string{"GET"}},
+				Allow: config.AllowSpec{AnyTailscale: true},
+			},
+			{
+				// Catch-all for everything else.
+				Match: config.RuleMatch{Listener: "web", Path: "/*"},
+				Allow: config.AllowSpec{AnyTailscale: true},
+			},
+		},
+		"deny",
+	)
+	e := NewEngine(cfg)
+
+	id := &Identity{UserLogin: "user@example.com"}
+
+	// GET to api.example.com matches first rule.
+	if !e.CheckL7("web", "/resource", "api.example.com", "GET", id) {
+		t.Error("expected allow for GET to api.example.com")
+	}
+
+	// POST to api.example.com skips first rule (method mismatch), hits catch-all.
+	if !e.CheckL7("web", "/resource", "api.example.com", "POST", id) {
+		t.Error("expected allow for POST to api.example.com (falls through to catch-all)")
+	}
+
+	// GET to other.com skips first rule (host mismatch), hits catch-all.
+	if !e.CheckL7("web", "/resource", "other.com", "GET", id) {
+		t.Error("expected allow for GET to other.com (falls through to catch-all)")
+	}
 }

@@ -1,0 +1,23 @@
+services:
+  backend:
+    build:
+      context: ./backend
+    ports:
+      - "18080:8080"
+
+  tailvoy:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    environment:
+      - TS_AUTHKEY=${TS_AUTHKEY}
+    command:
+      - "--policy"
+      - "/policy.yaml"
+      - "--standalone"
+      - "--log-level"
+      - "debug"
+    volumes:
+      - ./l7-test-policy-docker.yaml:/policy.yaml:ro
+    depends_on:
+      - backend

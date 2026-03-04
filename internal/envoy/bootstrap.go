@@ -12,6 +12,13 @@ import (
 // standalone mode (no xDS). Each listener in cfg gets an Envoy listener and
 // backend cluster. L7 listeners use HTTP Connection Manager with ext_authz;
 // L4 listeners use TCP proxy.
+// EnvoyInternalPort returns the internal port Envoy should listen on for a
+// given listener in standalone mode. This uses port + 10000 to avoid conflicts
+// with the tsnet listener on the same port number.
+func EnvoyInternalPort(listenPort string) int {
+	return portInt(listenPort) + 10000
+}
+
 func GenerateStandaloneConfig(cfg *config.Config, authzAddr string) (string, error) {
 	authzHost, authzPort := splitHostPort(authzAddr)
 
@@ -23,6 +30,7 @@ func GenerateStandaloneConfig(cfg *config.Config, authzAddr string) (string, err
 		fwdHost, fwdPort := splitHostPort(l.Forward)
 
 		if l.L7Policy {
+			// Envoy listens on internal port (port + 10000), tailvoy forwards here
 			listener := buildHTTPListener(l, backendName)
 			listeners = append(listeners, listener)
 		} else {
@@ -122,13 +130,45 @@ func InjectExtAuthz(bootstrapYAML string, authzAddr string) (string, error) {
 		return "", fmt.Errorf("listeners not found or invalid")
 	}
 
-	authzFilter := buildExtAuthzFilter(authzAddr)
+	// Add ext_authz cluster if not already present.
+	authzHost, authzPort := splitHostPort(authzAddr)
+	clusters, _ := sr["clusters"].([]interface{})
+	clusters = append(clusters, map[string]interface{}{
+		"name":            "tailvoy_ext_authz",
+		"connect_timeout": "1s",
+		"type":            "STRICT_DNS",
+		"load_assignment": map[string]interface{}{
+			"cluster_name": "tailvoy_ext_authz",
+			"endpoints": []interface{}{
+				map[string]interface{}{
+					"lb_endpoints": []interface{}{
+						map[string]interface{}{
+							"endpoint": map[string]interface{}{
+								"address": map[string]interface{}{
+									"socket_address": map[string]interface{}{
+										"address":    authzHost,
+										"port_value": portInt(authzPort),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	})
+	sr["clusters"] = clusters
 
 	for _, rawL := range listeners {
 		l, ok := rawL.(map[string]interface{})
 		if !ok {
 			continue
 		}
+		listenerName, _ := l["name"].(string)
+		if listenerName == "" {
+			listenerName = "default"
+		}
+		authzFilter := buildExtAuthzFilter(listenerName)
 		fcs, ok := l["filter_chains"].([]interface{})
 		if !ok {
 			continue
@@ -171,12 +211,13 @@ func InjectExtAuthz(bootstrapYAML string, authzAddr string) (string, error) {
 }
 
 func buildHTTPListener(l config.Listener, backendCluster string) map[string]interface{} {
+	envoyPort := EnvoyInternalPort(l.Port())
 	return map[string]interface{}{
 		"name": l.Name,
 		"address": map[string]interface{}{
 			"socket_address": map[string]interface{}{
-				"address":    "0.0.0.0",
-				"port_value": portInt(l.Port()),
+				"address":    "127.0.0.1",
+				"port_value": envoyPort,
 			},
 		},
 		"listener_filters": []interface{}{
@@ -195,6 +236,8 @@ func buildHTTPListener(l config.Listener, backendCluster string) map[string]inte
 						"typed_config": map[string]interface{}{
 							"@type":       "type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager",
 							"stat_prefix": l.Name,
+							"codec_type":  "AUTO",
+							"use_remote_address": true,
 							"route_config": map[string]interface{}{
 								"virtual_hosts": []interface{}{
 									map[string]interface{}{
@@ -214,7 +257,7 @@ func buildHTTPListener(l config.Listener, backendCluster string) map[string]inte
 								},
 							},
 							"http_filters": []interface{}{
-								buildExtAuthzFilter(""),
+								buildExtAuthzFilter(l.Name),
 								map[string]interface{}{
 									"name": "envoy.filters.http.router",
 									"typed_config": map[string]interface{}{
@@ -256,22 +299,43 @@ func buildTCPListener(l config.Listener, backendCluster string) map[string]inter
 	}
 }
 
-func buildExtAuthzFilter(authzAddr string) map[string]interface{} {
-	filter := map[string]interface{}{
+func buildExtAuthzFilter(listenerName string) map[string]interface{} {
+	return map[string]interface{}{
 		"name": "envoy.filters.http.ext_authz",
 		"typed_config": map[string]interface{}{
-			"@type":              "type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz",
-			"transport_api_version": "V3",
+			"@type":            "type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz",
 			"failure_mode_allow": false,
-			"grpc_service": map[string]interface{}{
-				"envoy_grpc": map[string]interface{}{
-					"cluster_name": "tailvoy_ext_authz",
+			"http_service": map[string]interface{}{
+				"server_uri": map[string]interface{}{
+					"uri":     "http://tailvoy-ext-authz",
+					"cluster": "tailvoy_ext_authz",
+					"timeout": "0.25s",
+				},
+				"authorization_request": map[string]interface{}{
+					"allowed_headers": map[string]interface{}{
+						"patterns": []interface{}{
+							map[string]interface{}{"exact": "x-forwarded-for"},
+							map[string]interface{}{"exact": "x-envoy-external-address"},
+							map[string]interface{}{"prefix": "x-tailvoy-"},
+						},
+					},
+					"headers_to_add": []interface{}{
+						map[string]interface{}{
+							"key":   "x-tailvoy-listener",
+							"value": listenerName,
+						},
+					},
+				},
+				"authorization_response": map[string]interface{}{
+					"allowed_upstream_headers": map[string]interface{}{
+						"patterns": []interface{}{
+							map[string]interface{}{"prefix": "x-tailscale-"},
+						},
+					},
 				},
 			},
 		},
 	}
-	_ = authzAddr // cluster reference is by name, addr used at cluster level
-	return filter
 }
 
 // splitHostPort splits an address of the form "host:port" into its components.

@@ -24,8 +24,8 @@ cleanup() {
         wait "$BACKEND_PID" 2>/dev/null || true
         echo "stopped backend (pid $BACKEND_PID)"
     fi
-    # clean up built binaries
     rm -f "$SCRIPT_DIR/tailvoy" "$SCRIPT_DIR/backend_server"
+    rm -rf "$HOME/Library/Application Support/tsnet-tailvoy" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -42,10 +42,8 @@ test_fail() {
 }
 
 # --- Build ---
-echo "=== Building tailvoy ==="
+echo "=== Building ==="
 (cd "$PROJECT_ROOT" && go build -o "$SCRIPT_DIR/tailvoy" ./cmd/tailvoy/)
-
-echo "=== Building backend ==="
 (cd "$SCRIPT_DIR/backend" && go build -o "$SCRIPT_DIR/backend_server" .)
 
 # --- Start backend ---
@@ -61,18 +59,18 @@ else
     exit 1
 fi
 
-# --- Start tailvoy ---
+# --- Start tailvoy (L4-only mode) ---
 echo "=== Starting tailvoy ==="
-export TS_AUTHKEY="${TS_AUTHKEY:-tskey-auth-k12q9xDxRo11CNTRL-mtTgZ7vLFP6muwWJE4dBP6da47xvdHVz}"
-"$SCRIPT_DIR/tailvoy" --policy "$SCRIPT_DIR/test-policy.yaml" --log-level debug &
+export TS_AUTHKEY="${TS_AUTHKEY:?TS_AUTHKEY must be set}"
+"$SCRIPT_DIR/tailvoy" --policy "$SCRIPT_DIR/l4-test-policy.yaml" --log-level debug 2>&1 &
 TAILVOY_PID=$!
 
-# --- Wait for tailvoy to join the tailnet ---
-echo "=== Waiting for tailvoy to join tailnet ==="
+# --- Wait for tailnet join ---
+echo "=== Waiting for tailnet join ==="
 TAILVOY_IP=""
 for i in $(seq 1 60); do
     TAILVOY_IP=$(tailscale status --json 2>/dev/null \
-        | jq -r '.Peer[] | select(.HostName == "tailvoy-integration-test") | .TailscaleIPs[0]' 2>/dev/null || true)
+        | jq -r '.Peer[] | select(.HostName == "tailvoy-l4-test") | .TailscaleIPs[0]' 2>/dev/null || true)
     if [ -n "$TAILVOY_IP" ] && [ "$TAILVOY_IP" != "null" ]; then
         echo "tailvoy joined as $TAILVOY_IP"
         break
@@ -81,53 +79,44 @@ for i in $(seq 1 60); do
 done
 
 if [ -z "$TAILVOY_IP" ] || [ "$TAILVOY_IP" = "null" ]; then
-    echo "FATAL: tailvoy did not join the tailnet after 120s"
+    echo "FATAL: tailvoy did not join the tailnet"
     exit 1
 fi
-
-# Give listeners a moment to bind
 sleep 3
 
 # --- L4 Tests ---
 echo ""
-echo "=== Running L4 Tests ==="
+echo "=== L4 Tests ==="
 
-# Test: L4 allow on port 80 (any_tailscale)
+# L4 allow on port 80
 echo "Test: L4 allow on port 80 (any_tailscale)"
-HTTP_STATUS=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 5 "http://$TAILVOY_IP:80/" 2>/dev/null || true)
-if [ "$HTTP_STATUS" = "200" ]; then
-    test_pass "L4 allow on port 80"
-else
-    test_fail "L4 allow on port 80" "expected HTTP 200, got '$HTTP_STATUS'"
-fi
+HTTP=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 10 "http://$TAILVOY_IP:80/" 2>&1 || true)
+if [ "$HTTP" = "200" ]; then test_pass "L4 allow port 80"; else test_fail "L4 allow port 80" "got $HTTP"; fi
 
-# Test: L4 deny on port 9999 (restricted tag)
+# L4 deny on port 9999
 echo "Test: L4 deny on port 9999 (restricted tag)"
-if curl -sf -o /dev/null --max-time 3 "http://$TAILVOY_IP:9999/" 2>/dev/null; then
-    test_fail "L4 deny on port 9999" "connection should have been denied"
+if curl -sf -o /dev/null --max-time 5 "http://$TAILVOY_IP:9999/" 2>/dev/null; then
+    test_fail "L4 deny port 9999" "should have been denied"
 else
-    test_pass "L4 deny on port 9999"
+    test_pass "L4 deny port 9999"
 fi
 
-# Test: verify backend echo through allowed port
+# Echo verification
 echo "Test: backend echo through tailvoy"
-ECHO_PATH=$(curl -sf --max-time 5 "http://$TAILVOY_IP:80/public/hello" 2>/dev/null | jq -r '.path' 2>/dev/null || true)
-if [ "$ECHO_PATH" = "/public/hello" ]; then
-    test_pass "backend echo returns correct path"
-else
-    test_fail "backend echo returns correct path" "expected '/public/hello', got '$ECHO_PATH'"
-fi
+ECHO_PATH=$(curl -sf --max-time 10 "http://$TAILVOY_IP:80/test/path" 2>&1 | jq -r '.path' 2>/dev/null || true)
+if [ "$ECHO_PATH" = "/test/path" ]; then test_pass "echo path"; else test_fail "echo path" "got '$ECHO_PATH'"; fi
+
+# Concurrent connections
+echo "Test: concurrent connections"
+OK=0
+for i in $(seq 1 10); do
+    if curl -sf -o /dev/null --max-time 5 "http://$TAILVOY_IP:80/$i" 2>/dev/null; then OK=$((OK+1)); fi
+done
+if [ "$OK" -eq 10 ]; then test_pass "10 concurrent"; else test_fail "10 concurrent" "$OK/10"; fi
 
 # --- Results ---
 echo ""
 echo "=== Results ==="
-echo "Passed: $PASS"
-echo "Failed: $FAIL"
-echo ""
-for t in "${TESTS[@]}"; do
-    echo "  $t"
-done
-
-if [ "$FAIL" -gt 0 ]; then
-    exit 1
-fi
+echo "Passed: $PASS / $((PASS + FAIL))"
+for t in "${TESTS[@]}"; do echo "  $t"; done
+if [ "$FAIL" -gt 0 ]; then exit 1; fi

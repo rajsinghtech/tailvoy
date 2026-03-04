@@ -130,6 +130,19 @@ func run(args []string) error {
 			return fmt.Errorf("generate envoy config: %w", err)
 		}
 
+		// Override forward address for L7 listeners to route through Envoy.
+		for i := range cfg.Listeners {
+			if cfg.Listeners[i].L7Policy {
+				internalPort := envoy.EnvoyInternalPort(cfg.Listeners[i].Port())
+				cfg.Listeners[i].Forward = fmt.Sprintf("127.0.0.1:%d", internalPort)
+				cfg.Listeners[i].ProxyProtocol = "v2"
+				logger.Info("standalone: routing L7 listener through envoy",
+					"name", cfg.Listeners[i].Name,
+					"envoy_addr", cfg.Listeners[i].Forward,
+				)
+			}
+		}
+
 		tmpFile, err := os.CreateTemp("", "tailvoy-envoy-*.yaml")
 		if err != nil {
 			cancel()

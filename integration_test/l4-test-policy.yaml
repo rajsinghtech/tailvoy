@@ -1,0 +1,30 @@
+tailscale:
+  hostname: "tailvoy-l4-test"
+  authkey: "${TS_AUTHKEY}"
+  ephemeral: true
+
+listeners:
+  - name: web
+    protocol: tcp
+    listen: ":80"
+    forward: "127.0.0.1:8080"
+    l7_policy: false
+
+  - name: restricted-port
+    protocol: tcp
+    listen: ":9999"
+    forward: "127.0.0.1:8080"
+    l7_policy: false
+
+l4_rules:
+  - match:
+      listener: web
+    allow:
+      any_tailscale: true
+
+  - match:
+      listener: restricted-port
+    allow:
+      tags: ["tag:nonexistent-tag-for-testing"]
+
+default: deny

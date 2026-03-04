@@ -11,6 +11,10 @@
 # Go build cache
 *.out
 
+# Integration test binaries
+/integration_test/tailvoy
+/integration_test/backend_server
+
 # Environment / runtime
 .env
 tsnet-*

@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -31,6 +32,19 @@ func (m *mockWhoIs) WhoIs(ctx context.Context, addr string) (*apitype.WhoIsRespo
 	return nil, fmt.Errorf("not found: %s", ip)
 }
 
+// tailvoyCapMap builds a PeerCapMap with the tailvoy capability containing
+// the given route patterns. Use "/*" for full access.
+func tailvoyCapMap(routes ...string) tailcfg.PeerCapMap {
+	type capRule struct {
+		Routes []string `json:"routes,omitempty"`
+	}
+	rule := capRule{Routes: routes}
+	b, _ := json.Marshal(rule)
+	return tailcfg.PeerCapMap{
+		"rajsingh.info/cap/tailvoy": []tailcfg.RawMessage{tailcfg.RawMessage(b)},
+	}
+}
+
 func TestListenerManagerAllowAndForward(t *testing.T) {
 	// 1. Start a TCP echo backend.
 	backend := startEchoServer(t)
@@ -46,17 +60,10 @@ func TestListenerManagerAllowAndForward(t *testing.T) {
 				Forward:  backend.Addr().String(),
 			},
 		},
-		L4Rules: []config.Rule{
-			{
-				Match: config.RuleMatch{Listener: "echo"},
-				Allow: config.AllowSpec{AnyTailscale: true},
-			},
-		},
-		Default: "deny",
 	}
 	listenerCfg := cfg.ListenerByName("echo")
 
-	// 3. Mock WhoIs that maps 127.0.0.1 to a valid identity.
+	// 3. Mock WhoIs that maps 127.0.0.1 to a valid identity with tailvoy cap.
 	whois := &mockWhoIs{
 		responses: map[string]*apitype.WhoIsResponse{
 			"127.0.0.1": {
@@ -66,12 +73,13 @@ func TestListenerManagerAllowAndForward(t *testing.T) {
 				UserProfile: &tailcfg.UserProfile{
 					LoginName: "user@example.com",
 				},
+				CapMap: tailvoyCapMap("/*"),
 			},
 		},
 	}
 
 	// 4. Build dependencies.
-	engine := policy.NewEngine(cfg)
+	engine := policy.NewEngine()
 	resolver := identity.NewResolver(whois)
 	l4proxy := NewL4Proxy(slog.Default())
 	lm := NewListenerManager(engine, resolver, l4proxy, slog.Default())
@@ -134,11 +142,6 @@ func TestListenerManagerRapidConnectDisconnect(t *testing.T) {
 		Listeners: []config.Listener{{
 			Name: "rapid", Protocol: "tcp", Listen: ":9990", Forward: backend.Addr().String(),
 		}},
-		L4Rules: []config.Rule{{
-			Match: config.RuleMatch{Listener: "rapid"},
-			Allow: config.AllowSpec{AnyTailscale: true},
-		}},
-		Default: "deny",
 	}
 	listenerCfg := cfg.ListenerByName("rapid")
 
@@ -147,11 +150,12 @@ func TestListenerManagerRapidConnectDisconnect(t *testing.T) {
 			"127.0.0.1": {
 				Node:        &tailcfg.Node{Name: "node.ts.net."},
 				UserProfile: &tailcfg.UserProfile{LoginName: "user@example.com"},
+				CapMap:      tailvoyCapMap("/*"),
 			},
 		},
 	}
 
-	engine := policy.NewEngine(cfg)
+	engine := policy.NewEngine()
 	resolver := identity.NewResolver(whois)
 	l4proxy := NewL4Proxy(slog.Default())
 	lm := NewListenerManager(engine, resolver, l4proxy, slog.Default())
@@ -188,11 +192,6 @@ func TestListenerManagerConcurrentConnections(t *testing.T) {
 		Listeners: []config.Listener{{
 			Name: "concurrent", Protocol: "tcp", Listen: ":9991", Forward: backend.Addr().String(),
 		}},
-		L4Rules: []config.Rule{{
-			Match: config.RuleMatch{Listener: "concurrent"},
-			Allow: config.AllowSpec{AnyTailscale: true},
-		}},
-		Default: "deny",
 	}
 	listenerCfg := cfg.ListenerByName("concurrent")
 
@@ -201,11 +200,12 @@ func TestListenerManagerConcurrentConnections(t *testing.T) {
 			"127.0.0.1": {
 				Node:        &tailcfg.Node{Name: "node.ts.net."},
 				UserProfile: &tailcfg.UserProfile{LoginName: "user@example.com"},
+				CapMap:      tailvoyCapMap("/*"),
 			},
 		},
 	}
 
-	engine := policy.NewEngine(cfg)
+	engine := policy.NewEngine()
 	resolver := identity.NewResolver(whois)
 	l4proxy := NewL4Proxy(slog.Default())
 	lm := NewListenerManager(engine, resolver, l4proxy, slog.Default())
@@ -285,11 +285,6 @@ func TestListenerManagerSlowIdentityResolution(t *testing.T) {
 		Listeners: []config.Listener{{
 			Name: "slow", Protocol: "tcp", Listen: ":9992", Forward: backend.Addr().String(),
 		}},
-		L4Rules: []config.Rule{{
-			Match: config.RuleMatch{Listener: "slow"},
-			Allow: config.AllowSpec{AnyTailscale: true},
-		}},
-		Default: "deny",
 	}
 	listenerCfg := cfg.ListenerByName("slow")
 
@@ -299,11 +294,12 @@ func TestListenerManagerSlowIdentityResolution(t *testing.T) {
 			"127.0.0.1": {
 				Node:        &tailcfg.Node{Name: "node.ts.net."},
 				UserProfile: &tailcfg.UserProfile{LoginName: "user@example.com"},
+				CapMap:      tailvoyCapMap("/*"),
 			},
 		},
 	}
 
-	engine := policy.NewEngine(cfg)
+	engine := policy.NewEngine()
 	resolver := identity.NewResolver(whois)
 	l4proxy := NewL4Proxy(slog.Default())
 	lm := NewListenerManager(engine, resolver, l4proxy, slog.Default())
@@ -351,11 +347,6 @@ func TestListenerManagerContextCancellationDuringServe(t *testing.T) {
 		Listeners: []config.Listener{{
 			Name: "canceltest", Protocol: "tcp", Listen: ":9993", Forward: backend.Addr().String(),
 		}},
-		L4Rules: []config.Rule{{
-			Match: config.RuleMatch{Listener: "canceltest"},
-			Allow: config.AllowSpec{AnyTailscale: true},
-		}},
-		Default: "deny",
 	}
 	listenerCfg := cfg.ListenerByName("canceltest")
 
@@ -364,11 +355,12 @@ func TestListenerManagerContextCancellationDuringServe(t *testing.T) {
 			"127.0.0.1": {
 				Node:        &tailcfg.Node{Name: "node.ts.net."},
 				UserProfile: &tailcfg.UserProfile{LoginName: "user@example.com"},
+				CapMap:      tailvoyCapMap("/*"),
 			},
 		},
 	}
 
-	engine := policy.NewEngine(cfg)
+	engine := policy.NewEngine()
 	resolver := identity.NewResolver(whois)
 	l4proxy := NewL4Proxy(slog.Default())
 	lm := NewListenerManager(engine, resolver, l4proxy, slog.Default())
@@ -429,17 +421,11 @@ func TestListenerManagerDeny(t *testing.T) {
 				Forward:  backend.Addr().String(),
 			},
 		},
-		L4Rules: []config.Rule{
-			{
-				Match: config.RuleMatch{Listener: "restricted"},
-				Allow: config.AllowSpec{Users: []string{"admin@corp.com"}},
-			},
-		},
-		Default: "deny",
 	}
 	listenerCfg := cfg.ListenerByName("restricted")
 
-	// WhoIs maps 127.0.0.1 to a non-admin user => should be denied.
+	// WhoIs maps 127.0.0.1 but without CapMap — identity will have no
+	// AllowedRoutes, so HasAccess returns false and the connection is denied.
 	whois := &mockWhoIs{
 		responses: map[string]*apitype.WhoIsResponse{
 			"127.0.0.1": {
@@ -453,7 +439,7 @@ func TestListenerManagerDeny(t *testing.T) {
 		},
 	}
 
-	engine := policy.NewEngine(cfg)
+	engine := policy.NewEngine()
 	resolver := identity.NewResolver(whois)
 	l4proxy := NewL4Proxy(slog.Default())
 	lm := NewListenerManager(engine, resolver, l4proxy, slog.Default())

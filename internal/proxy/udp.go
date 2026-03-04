@@ -107,7 +107,7 @@ func (p *UDPProxy) Serve(ctx context.Context, pc net.PacketConn, backendAddr str
 					"listener", listenerName, "remote", src, "err", err)
 				continue
 			}
-			if !engine.CheckL4(listenerName, id) {
+			if !engine.HasAccess(id) {
 				p.logger.Info("udp packet denied by L4 policy",
 					"listener", listenerName, "remote", src,
 					"identity", id.UserLogin, "node", id.NodeName)

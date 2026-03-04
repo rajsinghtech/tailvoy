@@ -1,5 +1,9 @@
 # Example tailvoy policy
 # Copy and modify for your deployment
+#
+# Authorization is defined in your Tailscale ACL policy (policy.hujson)
+# using peer capability grants with "rajsingh.info/cap/tailvoy".
+# See docs/plans/2026-03-04-cap-based-policy-design.md for details.
 
 tailscale:
   hostname: "tailvoy-gw"
@@ -20,35 +24,3 @@ listeners:
     forward: "127.0.0.1:10080"
     proxy_protocol: v2
     l7_policy: true
-
-l4_rules:
-  - match:
-      listener: https
-    allow:
-      any_tailscale: true
-
-  - match:
-      listener: http
-    allow:
-      any_tailscale: true
-
-l7_rules:
-  - match:
-      listener: https
-      path: "/admin/*"
-    allow:
-      tags: ["tag:admin"]
-
-  - match:
-      listener: https
-      path: "/*"
-    allow:
-      any_tailscale: true
-
-  - match:
-      listener: http
-      path: "/*"
-    allow:
-      any_tailscale: true
-
-default: deny

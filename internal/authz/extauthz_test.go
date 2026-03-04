@@ -2,6 +2,7 @@ package authz
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net"
@@ -16,7 +17,6 @@ import (
 	"tailscale.com/client/tailscale/apitype"
 	"tailscale.com/tailcfg"
 
-	"github.com/rajsinghtech/tailvoy/internal/config"
 	"github.com/rajsinghtech/tailvoy/internal/identity"
 	"github.com/rajsinghtech/tailvoy/internal/policy"
 )
@@ -33,10 +33,19 @@ func (m *mockWhoIs) WhoIs(_ context.Context, addr string) (*apitype.WhoIsRespons
 	return nil, fmt.Errorf("not found: %s", ip)
 }
 
-// testServer builds a Server with the given config and mock responses.
-func testServer(t *testing.T, cfg *config.Config, responses map[string]*apitype.WhoIsResponse) *Server {
+// capMap builds a PeerCapMap granting the given routes via the tailvoy capability.
+func capMap(routes ...string) tailcfg.PeerCapMap {
+	rule := identity.TailvoyCapRule{Routes: routes}
+	b, _ := json.Marshal(rule)
+	return tailcfg.PeerCapMap{
+		identity.CapTailvoy: []tailcfg.RawMessage{tailcfg.RawMessage(b)},
+	}
+}
+
+// testServer builds a Server with a cap-based policy engine and mock WhoIs responses.
+func testServer(t *testing.T, responses map[string]*apitype.WhoIsResponse) *Server {
 	t.Helper()
-	engine := policy.NewEngine(cfg)
+	engine := policy.NewEngine()
 	resolver := identity.NewResolver(&mockWhoIs{responses: responses})
 	return NewServer(engine, resolver, slog.Default())
 }
@@ -66,72 +75,18 @@ func startGRPC(t *testing.T, srv *Server) authv3.AuthorizationClient {
 	return authv3.NewAuthorizationClient(conn)
 }
 
-// checkReq builds a CheckRequest with the given headers and optional context extensions.
-func checkReq(headers map[string]string, path, host, method string, contextExtensions map[string]string) *authv3.CheckRequest {
+// checkReq builds a CheckRequest with the given headers and path.
+func checkReq(headers map[string]string, path string) *authv3.CheckRequest {
 	return &authv3.CheckRequest{
 		Attributes: &authv3.AttributeContext{
 			Request: &authv3.AttributeContext_Request{
 				Http: &authv3.AttributeContext_HttpRequest{
 					Headers: headers,
 					Path:    path,
-					Host:    host,
-					Method:  method,
 				},
 			},
-			ContextExtensions: contextExtensions,
 		},
 	}
-}
-
-// baseCfg returns a config that allows any tailscale user on "/*" for listener "default".
-func baseCfg() *config.Config {
-	return &config.Config{
-		Tailscale: config.TailscaleConfig{Hostname: "test"},
-		Listeners: []config.Listener{{
-			Name: "default", Protocol: "tcp", Listen: ":443", Forward: "localhost:8080",
-		}},
-		L7Rules: []config.Rule{{
-			Match: config.RuleMatch{Listener: "default", Path: "/*"},
-			Allow: config.AllowSpec{AnyTailscale: true},
-		}},
-		Default: "deny",
-	}
-}
-
-// adminCfg returns a config with an admin path restricted to a specific user,
-// plus a catch-all that allows any tailscale user.
-func adminCfg() *config.Config {
-	return &config.Config{
-		Tailscale: config.TailscaleConfig{Hostname: "test"},
-		Listeners: []config.Listener{{
-			Name: "default", Protocol: "tcp", Listen: ":443", Forward: "localhost:8080",
-		}},
-		L7Rules: []config.Rule{
-			{
-				Match: config.RuleMatch{Listener: "default", Path: "/admin/*"},
-				Allow: config.AllowSpec{Users: []string{"admin@example.com"}},
-			},
-			{
-				Match: config.RuleMatch{Listener: "default", Path: "/*"},
-				Allow: config.AllowSpec{AnyTailscale: true},
-			},
-		},
-		Default: "deny",
-	}
-}
-
-var aliceResp = &apitype.WhoIsResponse{
-	Node: &tailcfg.Node{Name: "alice-laptop.tail1234.ts.net."},
-	UserProfile: &tailcfg.UserProfile{
-		LoginName: "alice@example.com",
-	},
-}
-
-var adminResp = &apitype.WhoIsResponse{
-	Node: &tailcfg.Node{Name: "admin-box.tail1234.ts.net."},
-	UserProfile: &tailcfg.UserProfile{
-		LoginName: "admin@example.com",
-	},
 }
 
 func isOK(resp *authv3.CheckResponse) bool {
@@ -151,15 +106,41 @@ func getResponseHeader(resp *authv3.CheckResponse, key string) string {
 	return ""
 }
 
+// --- WhoIs response fixtures ---
+
+var aliceResp = &apitype.WhoIsResponse{
+	Node: &tailcfg.Node{Name: "alice-laptop.tail1234.ts.net."},
+	UserProfile: &tailcfg.UserProfile{
+		LoginName: "alice@example.com",
+	},
+	CapMap: capMap("/*"),
+}
+
+var aliceRestrictedResp = &apitype.WhoIsResponse{
+	Node: &tailcfg.Node{Name: "alice-laptop.tail1234.ts.net."},
+	UserProfile: &tailcfg.UserProfile{
+		LoginName: "alice@example.com",
+	},
+	CapMap: capMap("/api/*"),
+}
+
+// aliceNoCapResp has no CapMap entry — peer is on the tailnet but has no tailvoy grant.
+var aliceNoCapResp = &apitype.WhoIsResponse{
+	Node: &tailcfg.Node{Name: "alice-laptop.tail1234.ts.net."},
+	UserProfile: &tailcfg.UserProfile{
+		LoginName: "alice@example.com",
+	},
+}
+
 func TestAllowRequest(t *testing.T) {
-	srv := testServer(t, baseCfg(), map[string]*apitype.WhoIsResponse{
+	srv := testServer(t, map[string]*apitype.WhoIsResponse{
 		"100.64.1.1": aliceResp,
 	})
 	client := startGRPC(t, srv)
 
 	resp, err := client.Check(context.Background(), checkReq(
 		map[string]string{"x-forwarded-for": "100.64.1.1"},
-		"/api/data", "", "GET", nil,
+		"/api/data",
 	))
 	if err != nil {
 		t.Fatal(err)
@@ -178,69 +159,50 @@ func TestAllowRequest(t *testing.T) {
 	}
 }
 
-func TestAdminPathAllowForAdmin(t *testing.T) {
-	srv := testServer(t, adminCfg(), map[string]*apitype.WhoIsResponse{
-		"100.64.2.2": adminResp,
-	})
-	client := startGRPC(t, srv)
-
-	resp, err := client.Check(context.Background(), checkReq(
-		map[string]string{"x-forwarded-for": "100.64.2.2"},
-		"/admin/settings", "", "GET", nil,
-	))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !isOK(resp) {
-		t.Fatalf("expected OK for admin user on /admin/settings, got code %d", resp.GetStatus().GetCode())
-	}
-	if got := getResponseHeader(resp, "x-tailscale-user"); got != "admin@example.com" {
-		t.Errorf("x-tailscale-user = %q", got)
-	}
-}
-
-func TestAdminPathDenyForNonAdmin(t *testing.T) {
-	srv := testServer(t, adminCfg(), map[string]*apitype.WhoIsResponse{
-		"100.64.1.1": aliceResp,
+func TestDenyRoutesMismatch(t *testing.T) {
+	// alice has cap but only for /api/* — request to /admin/settings should be denied.
+	srv := testServer(t, map[string]*apitype.WhoIsResponse{
+		"100.64.1.1": aliceRestrictedResp,
 	})
 	client := startGRPC(t, srv)
 
 	resp, err := client.Check(context.Background(), checkReq(
 		map[string]string{"x-forwarded-for": "100.64.1.1"},
-		"/admin/settings", "", "GET", nil,
+		"/admin/settings",
 	))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if isOK(resp) {
-		t.Fatal("expected deny for non-admin on /admin path")
+		t.Fatal("expected deny for path not in allowed routes")
 	}
 }
 
-func TestNonAdminOnCatchAll(t *testing.T) {
-	srv := testServer(t, adminCfg(), map[string]*apitype.WhoIsResponse{
-		"100.64.1.1": aliceResp,
+func TestDenyNoCap(t *testing.T) {
+	// alice is on the tailnet but has no tailvoy capability at all.
+	srv := testServer(t, map[string]*apitype.WhoIsResponse{
+		"100.64.1.1": aliceNoCapResp,
 	})
 	client := startGRPC(t, srv)
 
 	resp, err := client.Check(context.Background(), checkReq(
 		map[string]string{"x-forwarded-for": "100.64.1.1"},
-		"/api/data", "", "GET", nil,
+		"/",
 	))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !isOK(resp) {
-		t.Fatalf("expected OK for alice on /api/data, got code %d", resp.GetStatus().GetCode())
+	if isOK(resp) {
+		t.Fatal("expected deny for peer with no tailvoy cap")
 	}
 }
 
 func TestNoSourceIP(t *testing.T) {
-	srv := testServer(t, baseCfg(), nil)
+	srv := testServer(t, nil)
 	client := startGRPC(t, srv)
 
 	resp, err := client.Check(context.Background(), checkReq(
-		map[string]string{}, "/", "", "GET", nil,
+		map[string]string{}, "/",
 	))
 	if err != nil {
 		t.Fatal(err)
@@ -251,20 +213,90 @@ func TestNoSourceIP(t *testing.T) {
 }
 
 func TestUnknownIP(t *testing.T) {
-	srv := testServer(t, baseCfg(), map[string]*apitype.WhoIsResponse{
+	srv := testServer(t, map[string]*apitype.WhoIsResponse{
 		"100.64.1.1": aliceResp,
 	})
 	client := startGRPC(t, srv)
 
 	resp, err := client.Check(context.Background(), checkReq(
 		map[string]string{"x-forwarded-for": "100.64.99.99"},
-		"/", "", "GET", nil,
+		"/",
 	))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if isOK(resp) {
 		t.Fatal("expected deny for unknown IP")
+	}
+}
+
+func TestTaggedNodeWithCap(t *testing.T) {
+	taggedResp := &apitype.WhoIsResponse{
+		Node: &tailcfg.Node{
+			Name: "server.tail1234.ts.net.",
+			Tags: []string{"tag:web", "tag:prod"},
+		},
+		CapMap: capMap("/*"),
+	}
+
+	srv := testServer(t, map[string]*apitype.WhoIsResponse{
+		"100.64.5.5": taggedResp,
+	})
+	client := startGRPC(t, srv)
+
+	resp, err := client.Check(context.Background(), checkReq(
+		map[string]string{"x-forwarded-for": "100.64.5.5"},
+		"/",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !isOK(resp) {
+		t.Fatalf("expected OK for tagged node with cap, got code %d", resp.GetStatus().GetCode())
+	}
+	if got := getResponseHeader(resp, "x-tailscale-tags"); got != "tag:web,tag:prod" {
+		t.Errorf("x-tailscale-tags = %q, want tag:web,tag:prod", got)
+	}
+	if got := getResponseHeader(resp, "x-tailscale-user"); got != "" {
+		t.Errorf("x-tailscale-user = %q, want empty for tagged node", got)
+	}
+}
+
+func TestOkResponseHeaders(t *testing.T) {
+	srv := testServer(t, map[string]*apitype.WhoIsResponse{
+		"100.64.1.1": aliceResp,
+	})
+	client := startGRPC(t, srv)
+
+	resp, err := client.Check(context.Background(), checkReq(
+		map[string]string{"x-forwarded-for": "100.64.1.1"},
+		"/",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ok := resp.GetOkResponse()
+	if ok == nil {
+		t.Fatal("expected OkResponse, got nil")
+	}
+
+	wantHeaders := map[string]string{
+		"x-tailscale-user": "alice@example.com",
+		"x-tailscale-node": "alice-laptop.tail1234.ts.net",
+		"x-tailscale-ip":   "100.64.1.1",
+		"x-tailscale-tags": "",
+	}
+
+	got := make(map[string]string)
+	for _, h := range ok.GetHeaders() {
+		got[h.GetHeader().GetKey()] = h.GetHeader().GetValue()
+	}
+
+	for k, want := range wantHeaders {
+		if got[k] != want {
+			t.Errorf("header %q = %q, want %q", k, got[k], want)
+		}
 	}
 }
 
@@ -311,74 +343,15 @@ func TestExtractSourceIP(t *testing.T) {
 	}
 }
 
-func TestContextExtensionsListener(t *testing.T) {
-	cfg := &config.Config{
-		Tailscale: config.TailscaleConfig{Hostname: "test"},
-		Listeners: []config.Listener{
-			{Name: "internal", Protocol: "tcp", Listen: ":8080", Forward: "localhost:9090"},
-		},
-		L7Rules: []config.Rule{{
-			Match: config.RuleMatch{Listener: "internal", Path: "/*"},
-			Allow: config.AllowSpec{AnyTailscale: true},
-		}},
-		Default: "deny",
-	}
-
-	srv := testServer(t, cfg, map[string]*apitype.WhoIsResponse{
-		"100.64.1.1": aliceResp,
-	})
-	client := startGRPC(t, srv)
-
-	// Without context_extensions, defaults to "default" which has no rules -> deny.
-	resp, err := client.Check(context.Background(), checkReq(
-		map[string]string{"x-forwarded-for": "100.64.1.1"},
-		"/", "", "GET", nil,
-	))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if isOK(resp) {
-		t.Fatal("expected deny for wrong listener (default fallback)")
-	}
-
-	// With the correct context extension -> allow.
-	resp2, err := client.Check(context.Background(), checkReq(
-		map[string]string{"x-forwarded-for": "100.64.1.1"},
-		"/", "", "GET", map[string]string{"listener": "internal"},
-	))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !isOK(resp2) {
-		t.Fatalf("expected OK for correct listener, got code %d", resp2.GetStatus().GetCode())
-	}
-}
-
-func TestMalformedXFF(t *testing.T) {
-	srv := testServer(t, baseCfg(), nil)
-	client := startGRPC(t, srv)
-
-	resp, err := client.Check(context.Background(), checkReq(
-		map[string]string{"x-forwarded-for": "not-an-ip"},
-		"/", "", "GET", nil,
-	))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if isOK(resp) {
-		t.Fatal("expected deny for malformed XFF")
-	}
-}
-
 func TestMultipleIPsInXFFUsesFirst(t *testing.T) {
-	srv := testServer(t, baseCfg(), map[string]*apitype.WhoIsResponse{
+	srv := testServer(t, map[string]*apitype.WhoIsResponse{
 		"100.64.1.1": aliceResp,
 	})
 	client := startGRPC(t, srv)
 
 	resp, err := client.Check(context.Background(), checkReq(
 		map[string]string{"x-forwarded-for": "100.64.1.1, 100.64.2.2"},
-		"/data", "", "GET", nil,
+		"/data",
 	))
 	if err != nil {
 		t.Fatal(err)
@@ -392,14 +365,14 @@ func TestMultipleIPsInXFFUsesFirst(t *testing.T) {
 }
 
 func TestMultipleIPsInXFFFirstUnknown(t *testing.T) {
-	srv := testServer(t, baseCfg(), map[string]*apitype.WhoIsResponse{
+	srv := testServer(t, map[string]*apitype.WhoIsResponse{
 		"100.64.1.1": aliceResp,
 	})
 	client := startGRPC(t, srv)
 
 	resp, err := client.Check(context.Background(), checkReq(
 		map[string]string{"x-forwarded-for": "100.64.99.99, 100.64.1.1"},
-		"/data", "", "GET", nil,
+		"/data",
 	))
 	if err != nil {
 		t.Fatal(err)
@@ -409,83 +382,8 @@ func TestMultipleIPsInXFFFirstUnknown(t *testing.T) {
 	}
 }
 
-func TestXFFTakesPrecedenceOverEnvoyHeader(t *testing.T) {
-	srv := testServer(t, baseCfg(), map[string]*apitype.WhoIsResponse{
-		"100.64.1.1": aliceResp,
-		"100.64.2.2": adminResp,
-	})
-	client := startGRPC(t, srv)
-
-	resp, err := client.Check(context.Background(), checkReq(
-		map[string]string{
-			"x-forwarded-for":          "100.64.1.1",
-			"x-envoy-external-address": "100.64.2.2",
-		},
-		"/", "", "GET", nil,
-	))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !isOK(resp) {
-		t.Fatal("expected OK")
-	}
-	if got := getResponseHeader(resp, "x-tailscale-user"); got != "alice@example.com" {
-		t.Errorf("x-tailscale-user = %q, want alice@example.com (XFF should take precedence)", got)
-	}
-}
-
-func TestResolverErrorOnSecondCall(t *testing.T) {
-	mock := &mockWhoIs{
-		responses: map[string]*apitype.WhoIsResponse{
-			"100.64.1.1": aliceResp,
-		},
-	}
-
-	cfg := baseCfg()
-	engine := policy.NewEngine(cfg)
-	resolver := identity.NewResolver(mock)
-	srv := NewServer(engine, resolver, slog.Default())
-	client := startGRPC(t, srv)
-
-	// First request: known IP, should succeed.
-	resp, err := client.Check(context.Background(), checkReq(
-		map[string]string{"x-forwarded-for": "100.64.1.1"},
-		"/", "", "GET", nil,
-	))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !isOK(resp) {
-		t.Fatalf("first request: expected OK, got code %d", resp.GetStatus().GetCode())
-	}
-
-	// Second request: unknown IP, resolver returns error.
-	resp2, err := client.Check(context.Background(), checkReq(
-		map[string]string{"x-forwarded-for": "100.64.99.99"},
-		"/", "", "GET", nil,
-	))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if isOK(resp2) {
-		t.Fatal("second request: expected deny")
-	}
-
-	// Third request: first IP again, should still work (cached).
-	resp3, err := client.Check(context.Background(), checkReq(
-		map[string]string{"x-forwarded-for": "100.64.1.1"},
-		"/", "", "GET", nil,
-	))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !isOK(resp3) {
-		t.Fatalf("third request (cached): expected OK, got code %d", resp3.GetStatus().GetCode())
-	}
-}
-
 func TestGracefulShutdown(t *testing.T) {
-	srv := testServer(t, baseCfg(), map[string]*apitype.WhoIsResponse{
+	srv := testServer(t, map[string]*apitype.WhoIsResponse{
 		"100.64.1.1": aliceResp,
 	})
 
@@ -505,7 +403,6 @@ func TestGracefulShutdown(t *testing.T) {
 	// Give server time to start.
 	time.Sleep(50 * time.Millisecond)
 
-	// Verify server is running by connecting.
 	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		t.Fatal(err)
@@ -514,7 +411,7 @@ func TestGracefulShutdown(t *testing.T) {
 
 	resp, err := client.Check(context.Background(), checkReq(
 		map[string]string{"x-forwarded-for": "100.64.1.1"},
-		"/", "", "GET", nil,
+		"/",
 	))
 	if err != nil {
 		t.Fatal(err)
@@ -536,240 +433,12 @@ func TestGracefulShutdown(t *testing.T) {
 	}
 }
 
-func TestHostBasedRouting(t *testing.T) {
-	cfg := &config.Config{
-		Tailscale: config.TailscaleConfig{Hostname: "test"},
-		Listeners: []config.Listener{{
-			Name: "default", Protocol: "tcp", Listen: ":443", Forward: "localhost:8080",
-		}},
-		L7Rules: []config.Rule{
-			{
-				Match: config.RuleMatch{Listener: "default", Path: "/*", Host: "admin.example.com"},
-				Allow: config.AllowSpec{Users: []string{"admin@example.com"}},
-			},
-			{
-				Match: config.RuleMatch{Listener: "default", Path: "/*"},
-				Allow: config.AllowSpec{AnyTailscale: true},
-			},
-		},
-		Default: "deny",
-	}
-
-	srv := testServer(t, cfg, map[string]*apitype.WhoIsResponse{
-		"100.64.1.1": aliceResp,
-		"100.64.2.2": adminResp,
-	})
-	client := startGRPC(t, srv)
-
-	// alice hitting the admin host -> deny
-	resp, err := client.Check(context.Background(), checkReq(
-		map[string]string{"x-forwarded-for": "100.64.1.1"},
-		"/", "admin.example.com", "GET", nil,
-	))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if isOK(resp) {
-		t.Fatal("alice on admin host: expected deny")
-	}
-
-	// admin hitting the admin host -> allow
-	resp2, err := client.Check(context.Background(), checkReq(
-		map[string]string{"x-forwarded-for": "100.64.2.2"},
-		"/", "admin.example.com", "GET", nil,
-	))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !isOK(resp2) {
-		t.Fatalf("admin on admin host: expected OK, got code %d", resp2.GetStatus().GetCode())
-	}
-
-	// alice hitting a different host -> allow (falls through to catch-all)
-	resp3, err := client.Check(context.Background(), checkReq(
-		map[string]string{"x-forwarded-for": "100.64.1.1"},
-		"/", "public.example.com", "GET", nil,
-	))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !isOK(resp3) {
-		t.Fatalf("alice on public host: expected OK, got code %d", resp3.GetStatus().GetCode())
-	}
-}
-
-func TestMethodBasedRouting(t *testing.T) {
-	cfg := &config.Config{
-		Tailscale: config.TailscaleConfig{Hostname: "test"},
-		Listeners: []config.Listener{{
-			Name: "default", Protocol: "tcp", Listen: ":443", Forward: "localhost:8080",
-		}},
-		L7Rules: []config.Rule{
-			{
-				Match: config.RuleMatch{Listener: "default", Path: "/*", Methods: []string{"GET", "HEAD"}},
-				Allow: config.AllowSpec{AnyTailscale: true},
-			},
-		},
-		Default: "deny",
-	}
-
-	srv := testServer(t, cfg, map[string]*apitype.WhoIsResponse{
-		"100.64.1.1": aliceResp,
-	})
-	client := startGRPC(t, srv)
-
-	// GET should be allowed
-	resp, err := client.Check(context.Background(), checkReq(
-		map[string]string{"x-forwarded-for": "100.64.1.1"},
-		"/", "", "GET", nil,
-	))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !isOK(resp) {
-		t.Fatalf("alice GET: expected OK, got code %d", resp.GetStatus().GetCode())
-	}
-
-	// POST should be denied
-	resp2, err := client.Check(context.Background(), checkReq(
-		map[string]string{"x-forwarded-for": "100.64.1.1"},
-		"/", "", "POST", nil,
-	))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if isOK(resp2) {
-		t.Fatal("alice POST: expected deny")
-	}
-}
-
-func TestHostAndMethodCombined(t *testing.T) {
-	cfg := &config.Config{
-		Tailscale: config.TailscaleConfig{Hostname: "test"},
-		Listeners: []config.Listener{{
-			Name: "default", Protocol: "tcp", Listen: ":443", Forward: "localhost:8080",
-		}},
-		L7Rules: []config.Rule{
-			{
-				Match: config.RuleMatch{Listener: "default", Path: "/api/*", Host: "api.example.com", Methods: []string{"GET"}},
-				Allow: config.AllowSpec{AnyTailscale: true},
-			},
-			{
-				Match: config.RuleMatch{Listener: "default", Path: "/*"},
-				Allow: config.AllowSpec{AnyTailscale: true},
-			},
-		},
-		Default: "deny",
-	}
-
-	srv := testServer(t, cfg, map[string]*apitype.WhoIsResponse{
-		"100.64.1.1": aliceResp,
-	})
-	client := startGRPC(t, srv)
-
-	// GET /api/data on api.example.com -> allow (matches rule 1)
-	resp, err := client.Check(context.Background(), checkReq(
-		map[string]string{"x-forwarded-for": "100.64.1.1"},
-		"/api/data", "api.example.com", "GET", nil,
-	))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !isOK(resp) {
-		t.Fatalf("GET /api/data api.example.com: expected OK, got code %d", resp.GetStatus().GetCode())
-	}
-
-	// POST /api/data on api.example.com -> allow (method doesn't match rule 1, falls to catch-all)
-	resp2, err := client.Check(context.Background(), checkReq(
-		map[string]string{"x-forwarded-for": "100.64.1.1"},
-		"/api/data", "api.example.com", "POST", nil,
-	))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !isOK(resp2) {
-		t.Fatalf("POST /api/data api.example.com: expected OK, got code %d", resp2.GetStatus().GetCode())
-	}
-
-	// GET /api/data on other.com -> allow (host doesn't match rule 1, falls to catch-all)
-	resp3, err := client.Check(context.Background(), checkReq(
-		map[string]string{"x-forwarded-for": "100.64.1.1"},
-		"/api/data", "other.com", "GET", nil,
-	))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !isOK(resp3) {
-		t.Fatalf("GET /api/data other.com: expected OK, got code %d", resp3.GetStatus().GetCode())
-	}
-}
-
-func TestTaggedNodeHeaders(t *testing.T) {
-	taggedResp := &apitype.WhoIsResponse{
-		Node: &tailcfg.Node{
-			Name: "server.tail1234.ts.net.",
-			Tags: []string{"tag:web", "tag:prod"},
-		},
-	}
-
-	cfg := &config.Config{
-		Tailscale: config.TailscaleConfig{Hostname: "test"},
-		Listeners: []config.Listener{{
-			Name: "default", Protocol: "tcp", Listen: ":443", Forward: "localhost:8080",
-		}},
-		L7Rules: []config.Rule{{
-			Match: config.RuleMatch{Listener: "default", Path: "/*"},
-			Allow: config.AllowSpec{Tags: []string{"tag:web"}},
-		}},
-		Default: "deny",
-	}
-
-	srv := testServer(t, cfg, map[string]*apitype.WhoIsResponse{
-		"100.64.5.5": taggedResp,
-	})
-	client := startGRPC(t, srv)
-
-	resp, err := client.Check(context.Background(), checkReq(
-		map[string]string{"x-forwarded-for": "100.64.5.5"},
-		"/", "", "GET", nil,
-	))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !isOK(resp) {
-		t.Fatalf("expected OK for tagged node, got code %d", resp.GetStatus().GetCode())
-	}
-	if got := getResponseHeader(resp, "x-tailscale-tags"); got != "tag:web,tag:prod" {
-		t.Errorf("x-tailscale-tags = %q, want tag:web,tag:prod", got)
-	}
-	if got := getResponseHeader(resp, "x-tailscale-user"); got != "" {
-		t.Errorf("x-tailscale-user = %q, want empty for tagged node", got)
-	}
-}
-
-// Verify the gRPC status code is reported correctly.
-func TestDenyReturnsPermissionDenied(t *testing.T) {
-	srv := testServer(t, baseCfg(), nil)
-	client := startGRPC(t, srv)
-
-	resp, err := client.Check(context.Background(), checkReq(
-		map[string]string{}, "/", "", "GET", nil,
-	))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.GetStatus().GetCode() != int32(codes.PermissionDenied) {
-		t.Errorf("deny status code = %d, want %d (PermissionDenied)", resp.GetStatus().GetCode(), codes.PermissionDenied)
-	}
-}
-
-// Verify that the gRPC call itself returns OK status (no transport error).
 func TestGRPCTransportOK(t *testing.T) {
-	srv := testServer(t, baseCfg(), nil)
+	srv := testServer(t, nil)
 	client := startGRPC(t, srv)
 
 	_, err := client.Check(context.Background(), checkReq(
-		map[string]string{}, "/", "", "GET", nil,
+		map[string]string{}, "/",
 	))
 	if err != nil {
 		st, ok := status.FromError(err)
@@ -780,41 +449,17 @@ func TestGRPCTransportOK(t *testing.T) {
 	}
 }
 
-// Verify OkResponse has upstream headers.
-func TestOkResponseHeaders(t *testing.T) {
-	srv := testServer(t, baseCfg(), map[string]*apitype.WhoIsResponse{
-		"100.64.1.1": aliceResp,
-	})
+func TestDenyReturnsPermissionDenied(t *testing.T) {
+	srv := testServer(t, nil)
 	client := startGRPC(t, srv)
 
 	resp, err := client.Check(context.Background(), checkReq(
-		map[string]string{"x-forwarded-for": "100.64.1.1"},
-		"/", "", "GET", nil,
+		map[string]string{}, "/",
 	))
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	ok := resp.GetOkResponse()
-	if ok == nil {
-		t.Fatal("expected OkResponse, got nil")
-	}
-
-	wantHeaders := map[string]string{
-		"x-tailscale-user": "alice@example.com",
-		"x-tailscale-node": "alice-laptop.tail1234.ts.net",
-		"x-tailscale-ip":   "100.64.1.1",
-		"x-tailscale-tags": "",
-	}
-
-	got := make(map[string]string)
-	for _, h := range ok.GetHeaders() {
-		got[h.GetHeader().GetKey()] = h.GetHeader().GetValue()
-	}
-
-	for k, want := range wantHeaders {
-		if got[k] != want {
-			t.Errorf("header %q = %q, want %q", k, got[k], want)
-		}
+	if resp.GetStatus().GetCode() != int32(codes.PermissionDenied) {
+		t.Errorf("deny status code = %d, want %d (PermissionDenied)", resp.GetStatus().GetCode(), codes.PermissionDenied)
 	}
 }

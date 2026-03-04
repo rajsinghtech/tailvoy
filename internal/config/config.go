@@ -12,9 +12,6 @@ import (
 type Config struct {
 	Tailscale TailscaleConfig `yaml:"tailscale"`
 	Listeners []Listener      `yaml:"listeners"`
-	L4Rules   []Rule          `yaml:"l4_rules"`
-	L7Rules   []Rule          `yaml:"l7_rules"`
-	Default   string          `yaml:"default"`
 }
 
 type TailscaleConfig struct {
@@ -30,25 +27,6 @@ type Listener struct {
 	Forward       string `yaml:"forward"`
 	ProxyProtocol string `yaml:"proxy_protocol"`
 	L7Policy      bool   `yaml:"l7_policy"`
-}
-
-type Rule struct {
-	Match RuleMatch `yaml:"match"`
-	Allow AllowSpec `yaml:"allow"`
-}
-
-type RuleMatch struct {
-	Listener string   `yaml:"listener"`
-	Path     string   `yaml:"path"`
-	Host     string   `yaml:"host"`
-	Methods  []string `yaml:"methods"`
-}
-
-type AllowSpec struct {
-	AnyTailscale bool     `yaml:"any_tailscale"`
-	Users        []string `yaml:"users"`
-	Tags         []string `yaml:"tags"`
-	Groups       []string `yaml:"groups"`
 }
 
 var envVarRe = regexp.MustCompile(`\$\{([^}]+)\}`)
@@ -121,38 +99,6 @@ func (c *Config) validate() error {
 			return fmt.Errorf("duplicate listener name: %q", l.Name)
 		}
 		listenerNames[l.Name] = struct{}{}
-	}
-
-	for i, r := range c.L4Rules {
-		if _, ok := listenerNames[r.Match.Listener]; !ok {
-			return fmt.Errorf("l4_rules[%d].match.listener references unknown listener: %q", i, r.Match.Listener)
-		}
-	}
-
-	for i, r := range c.L7Rules {
-		if _, ok := listenerNames[r.Match.Listener]; !ok {
-			return fmt.Errorf("l7_rules[%d].match.listener references unknown listener: %q", i, r.Match.Listener)
-		}
-		if r.Match.Path == "" {
-			return fmt.Errorf("l7_rules[%d].match.path is required", i)
-		}
-		if h := r.Match.Host; h != "" && strings.Contains(h, "*") {
-			if !strings.HasPrefix(h, "*.") || strings.Count(h, "*") > 1 {
-				return fmt.Errorf("l7_rules[%d].match.host wildcard must be *.domain form, got %q", i, h)
-			}
-		}
-		for j, m := range r.Match.Methods {
-			c.L7Rules[i].Match.Methods[j] = strings.ToUpper(m)
-		}
-	}
-
-	switch c.Default {
-	case "":
-		c.Default = "deny"
-	case "allow", "deny":
-		// valid
-	default:
-		return fmt.Errorf("default must be \"allow\" or \"deny\", got %q", c.Default)
 	}
 
 	return nil

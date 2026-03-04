@@ -30,7 +30,6 @@ func TestGenerateStandaloneConfig(t *testing.T) {
 				L7Policy: false,
 			},
 		},
-		Default: "deny",
 	}
 
 	result, err := GenerateStandaloneConfig(cfg, "127.0.0.1:10000")
@@ -80,7 +79,6 @@ func TestGenerateStandaloneConfigOnlyL7(t *testing.T) {
 			{Name: "api", Protocol: "tcp", Listen: ":443", Forward: "127.0.0.1:8443", L7Policy: true},
 			{Name: "web", Protocol: "tcp", Listen: ":8080", Forward: "127.0.0.1:80", L7Policy: true},
 		},
-		Default: "deny",
 	}
 
 	result, err := GenerateStandaloneConfig(cfg, "127.0.0.1:10000")
@@ -146,7 +144,6 @@ func TestGenerateStandaloneConfigOnlyL4(t *testing.T) {
 			{Name: "pg", Protocol: "tcp", Listen: ":5432", Forward: "127.0.0.1:5432", L7Policy: false},
 			{Name: "redis", Protocol: "tcp", Listen: ":6379", Forward: "127.0.0.1:6379", L7Policy: false},
 		},
-		Default: "deny",
 	}
 
 	result, err := GenerateStandaloneConfig(cfg, "127.0.0.1:10000")
@@ -210,7 +207,6 @@ func TestGenerateStandaloneConfigMixed(t *testing.T) {
 			{Name: "web", Protocol: "tcp", Listen: ":443", Forward: "127.0.0.1:8443", L7Policy: true},
 			{Name: "db", Protocol: "tcp", Listen: ":5432", Forward: "127.0.0.1:5432", L7Policy: false},
 		},
-		Default: "deny",
 	}
 
 	result, err := GenerateStandaloneConfig(cfg, "127.0.0.1:10000")
@@ -249,7 +245,6 @@ func TestGenerateStandaloneConfigManyListeners(t *testing.T) {
 			{Name: "l5", Protocol: "tcp", Listen: ":8005", Forward: "127.0.0.1:9005", L7Policy: true},
 			{Name: "l6", Protocol: "tcp", Listen: ":8006", Forward: "127.0.0.1:9006", L7Policy: false},
 		},
-		Default: "deny",
 	}
 
 	result, err := GenerateStandaloneConfig(cfg, "127.0.0.1:10000")
@@ -289,7 +284,6 @@ func TestGenerateStandaloneConfigExtAuthzCluster(t *testing.T) {
 		Listeners: []config.Listener{
 			{Name: "web", Protocol: "tcp", Listen: ":80", Forward: "127.0.0.1:8080", L7Policy: true},
 		},
-		Default: "deny",
 	}
 
 	result, err := GenerateStandaloneConfig(cfg, "10.0.0.5:9999")
@@ -339,7 +333,6 @@ func TestGenerateStandaloneConfigHTTPListenerHasProxyProtocol(t *testing.T) {
 		Listeners: []config.Listener{
 			{Name: "web", Protocol: "tcp", Listen: ":80", Forward: "127.0.0.1:8080", L7Policy: true},
 		},
-		Default: "deny",
 	}
 
 	result, err := GenerateStandaloneConfig(cfg, "127.0.0.1:10000")
@@ -373,7 +366,6 @@ func TestGenerateStandaloneConfigHTTPListenerHasExtAuthzGRPCFilter(t *testing.T)
 		Listeners: []config.Listener{
 			{Name: "mylistener", Protocol: "tcp", Listen: ":80", Forward: "127.0.0.1:8080", L7Policy: true},
 		},
-		Default: "deny",
 	}
 
 	result, err := GenerateStandaloneConfig(cfg, "127.0.0.1:10000")
@@ -459,7 +451,6 @@ func TestGenerateStandaloneConfigExtAuthzClusterHasHTTP2(t *testing.T) {
 		Listeners: []config.Listener{
 			{Name: "web", Protocol: "tcp", Listen: ":80", Forward: "127.0.0.1:8080", L7Policy: true},
 		},
-		Default: "deny",
 	}
 
 	result, err := GenerateStandaloneConfig(cfg, "127.0.0.1:10000")
@@ -515,7 +506,6 @@ func TestGenerateStandaloneConfigYAMLRoundTrip(t *testing.T) {
 			{Name: "web", Protocol: "tcp", Listen: ":443", Forward: "127.0.0.1:8443", L7Policy: true},
 			{Name: "db", Protocol: "tcp", Listen: ":5432", Forward: "127.0.0.1:5432", L7Policy: false},
 		},
-		Default: "deny",
 	}
 
 	result, err := GenerateStandaloneConfig(cfg, "127.0.0.1:10000")
@@ -547,7 +537,6 @@ func TestGenerateStandaloneConfigPort0(t *testing.T) {
 		Listeners: []config.Listener{
 			{Name: "ephemeral", Protocol: "tcp", Listen: ":0", Forward: "127.0.0.1:8080", L7Policy: true},
 		},
-		Default: "deny",
 	}
 
 	result, err := GenerateStandaloneConfig(cfg, "127.0.0.1:10000")
@@ -576,7 +565,6 @@ func TestGenerateStandaloneConfigNoListeners(t *testing.T) {
 	cfg := &config.Config{
 		Tailscale: config.TailscaleConfig{Hostname: "test"},
 		Listeners: []config.Listener{},
-		Default:   "deny",
 	}
 
 	result, err := GenerateStandaloneConfig(cfg, "127.0.0.1:10000")

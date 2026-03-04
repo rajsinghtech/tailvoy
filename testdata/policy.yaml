@@ -16,31 +16,3 @@ listeners:
     listen: ":5432"
     forward: "db-server:5432"
     l7_policy: false
-
-l4_rules:
-  - match:
-      listener: https
-    allow:
-      any_tailscale: true
-
-  - match:
-      listener: postgres
-    allow:
-      tags: ["tag:db-access"]
-      users: ["dba@company.com"]
-
-l7_rules:
-  - match:
-      listener: https
-      path: "/admin/*"
-    allow:
-      users: ["alice@company.com"]
-      tags: ["tag:admin"]
-
-  - match:
-      listener: https
-      path: "/*"
-    allow:
-      any_tailscale: true
-
-default: deny

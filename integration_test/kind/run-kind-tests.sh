@@ -249,9 +249,8 @@ echo "========================================"
 assert_http "HTTP: GET / allow" "http://$IP:80/" "200"
 assert_http "HTTP: GET /public/hello allow" "http://$IP:80/public/hello" "200"
 assert_http "HTTP: GET /health allow" "http://$IP:80/health" "200"
-assert_http "HTTP: GET /admin/settings deny" "http://$IP:80/admin/settings" "403"
-assert_http "HTTP: GET /admin/users deny" "http://$IP:80/admin/users" "403"
-assert_http "HTTP: GET /unknown deny (default)" "http://$IP:80/unknown" "403"
+assert_http "HTTP: GET /admin/settings allow" "http://$IP:80/admin/settings" "200"
+assert_http "HTTP: GET /any/path allow" "http://$IP:80/any/path" "200"
 
 # Identity headers
 BODY=$(curl -sf --max-time 10 "http://$IP:80/public/headers" 2>&1 || true)

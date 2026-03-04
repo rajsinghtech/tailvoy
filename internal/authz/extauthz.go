@@ -49,20 +49,13 @@ func (s *Server) Check(ctx context.Context, req *authv3.CheckRequest) (*authv3.C
 	}
 
 	path := httpReq.GetPath()
-	host := httpReq.GetHost()
-	method := httpReq.GetMethod()
 
-	listener := req.GetAttributes().GetContextExtensions()["listener"]
-	if listener == "" {
-		listener = "default"
-	}
-
-	if !s.engine.CheckL7(listener, path, host, method, id) {
-		s.logger.Info("ext_authz: denied", "ip", srcIP, "path", path, "host", host, "method", method, "listener", listener, "user", id.UserLogin, "node", id.NodeName)
+	if !s.engine.CheckAccess(path, id) {
+		s.logger.Info("ext_authz: denied", "ip", srcIP, "path", path, "user", id.UserLogin, "node", id.NodeName)
 		return denyResponse(), nil
 	}
 
-	s.logger.Debug("ext_authz: allowed", "ip", srcIP, "path", path, "host", host, "method", method, "listener", listener, "user", id.UserLogin, "node", id.NodeName)
+	s.logger.Debug("ext_authz: allowed", "ip", srcIP, "path", path, "user", id.UserLogin, "node", id.NodeName)
 	return allowResponse(id), nil
 }
 
@@ -88,6 +81,10 @@ func denyResponse() *authv3.CheckResponse {
 		HttpResponse: &authv3.CheckResponse_DeniedResponse{
 			DeniedResponse: &authv3.DeniedHttpResponse{
 				Status: &typev3.HttpStatus{Code: typev3.StatusCode_Forbidden},
+				Headers: []*corev3.HeaderValueOption{
+					header("content-type", "application/json"),
+				},
+				Body: `{"error":"forbidden","message":"access denied by tailvoy policy"}`,
 			},
 		},
 	}

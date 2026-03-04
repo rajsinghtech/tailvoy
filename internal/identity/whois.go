@@ -9,9 +9,19 @@ import (
 	"time"
 
 	"tailscale.com/client/tailscale/apitype"
+	"tailscale.com/tailcfg"
 
 	"github.com/rajsinghtech/tailvoy/internal/policy"
 )
+
+// CapTailvoy is the peer capability key for tailvoy access rules.
+// Define grants in your tailnet ACL policy to populate this.
+const CapTailvoy tailcfg.PeerCapability = "rajsingh.info/cap/tailvoy"
+
+// TailvoyCapRule defines the structure of the capability value.
+type TailvoyCapRule struct {
+	Routes []string `json:"routes,omitempty"`
+}
 
 const cacheTTL = 5 * time.Minute
 
@@ -169,6 +179,23 @@ func toIdentity(resp *apitype.WhoIsResponse, ip netip.Addr) *policy.Identity {
 
 	if resp.UserProfile != nil && !id.IsTagged {
 		id.UserLogin = resp.UserProfile.LoginName
+	}
+
+	// Extract allowed routes from tailvoy peer capability grants.
+	rules, _ := tailcfg.UnmarshalCapJSON[TailvoyCapRule](resp.CapMap, CapTailvoy)
+	seen := map[string]struct{}{}
+	for _, rule := range rules {
+		if len(rule.Routes) == 0 {
+			// Cap with no routes = full access.
+			id.AllowedRoutes = []string{"/*"}
+			return id
+		}
+		for _, r := range rule.Routes {
+			if _, ok := seen[r]; !ok {
+				seen[r] = struct{}{}
+				id.AllowedRoutes = append(id.AllowedRoutes, r)
+			}
+		}
 	}
 
 	return id

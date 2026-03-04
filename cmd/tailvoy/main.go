@@ -83,7 +83,7 @@ func run(args []string) error {
 	}
 
 	// Build components.
-	engine := policy.NewEngine(cfg)
+	engine := policy.NewEngine()
 	resolver := identity.NewResolver(lc)
 	l4proxy := proxy.NewL4Proxy(logger)
 	udpProxy := proxy.NewUDPProxy(logger)

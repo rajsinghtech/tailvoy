@@ -9,30 +9,3 @@ listeners:
     listen: ":80"
     forward: "backend:8080"
     l7_policy: true
-
-l4_rules:
-  - match:
-      listener: web
-    allow:
-      any_tailscale: true
-
-l7_rules:
-  - match:
-      listener: web
-      path: "/admin/*"
-    allow:
-      tags: ["tag:nonexistent-admin-tag"]
-
-  - match:
-      listener: web
-      path: "/user-only/*"
-    allow:
-      users: ["rajsinghtech@github"]
-
-  - match:
-      listener: web
-      path: "/public/*"
-    allow:
-      any_tailscale: true
-
-default: deny

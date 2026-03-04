@@ -85,7 +85,7 @@ func (lm *ListenerManager) handleConn(ctx context.Context, conn net.Conn, listen
 		return
 	}
 
-	if !lm.engine.CheckL4(listenerCfg.Name, id) {
+	if !lm.engine.HasAccess(id) {
 		lm.logger.Info("connection denied by L4 policy",
 			"listener", listenerCfg.Name,
 			"remote", remoteAddr,

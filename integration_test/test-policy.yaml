@@ -15,35 +15,3 @@ listeners:
     listen: ":9999"
     forward: "127.0.0.1:8080"
     l7_policy: false
-
-l4_rules:
-  - match:
-      listener: web
-    allow:
-      any_tailscale: true
-
-  - match:
-      listener: restricted-port
-    allow:
-      tags: ["tag:nonexistent-tag-for-testing"]
-
-l7_rules:
-  - match:
-      listener: web
-      path: "/admin/*"
-    allow:
-      tags: ["tag:nonexistent-admin-tag"]
-
-  - match:
-      listener: web
-      path: "/user-only/*"
-    allow:
-      users: ["rajsinghtech@github"]
-
-  - match:
-      listener: web
-      path: "/public/*"
-    allow:
-      any_tailscale: true
-
-default: deny

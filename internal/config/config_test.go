@@ -28,15 +28,6 @@ func TestLoadFromFile(t *testing.T) {
 	if got := len(cfg.Listeners); got != 2 {
 		t.Errorf("len(listeners) = %d, want 2", got)
 	}
-	if got := len(cfg.L4Rules); got != 2 {
-		t.Errorf("len(l4_rules) = %d, want 2", got)
-	}
-	if got := len(cfg.L7Rules); got != 2 {
-		t.Errorf("len(l7_rules) = %d, want 2", got)
-	}
-	if cfg.Default != "deny" {
-		t.Errorf("default = %q, want %q", cfg.Default, "deny")
-	}
 }
 
 func TestEnvVarExpansion(t *testing.T) {
@@ -68,9 +59,6 @@ listeners:
 	}
 	if cfg.Tailscale.Hostname != "minimal" {
 		t.Errorf("hostname = %q, want %q", cfg.Tailscale.Hostname, "minimal")
-	}
-	if cfg.Default != "deny" {
-		t.Errorf("default = %q, want %q (should default to deny)", cfg.Default, "deny")
 	}
 }
 
@@ -110,75 +98,6 @@ listeners:
 			want: "duplicate listener name",
 		},
 		{
-			name: "unknown listener in l4 rule",
-			yaml: `
-tailscale:
-  hostname: test
-listeners:
-  - name: web
-    protocol: tcp
-    listen: ":80"
-    forward: "localhost:80"
-l4_rules:
-  - match:
-      listener: ghost
-    allow:
-      any_tailscale: true
-`,
-			want: "unknown listener",
-		},
-		{
-			name: "unknown listener in l7 rule",
-			yaml: `
-tailscale:
-  hostname: test
-listeners:
-  - name: web
-    protocol: tcp
-    listen: ":80"
-    forward: "localhost:80"
-l7_rules:
-  - match:
-      listener: ghost
-      path: "/"
-    allow:
-      any_tailscale: true
-`,
-			want: "unknown listener",
-		},
-		{
-			name: "l7 rule missing path",
-			yaml: `
-tailscale:
-  hostname: test
-listeners:
-  - name: web
-    protocol: tcp
-    listen: ":80"
-    forward: "localhost:80"
-l7_rules:
-  - match:
-      listener: web
-    allow:
-      any_tailscale: true
-`,
-			want: "path is required",
-		},
-		{
-			name: "invalid default value",
-			yaml: `
-tailscale:
-  hostname: test
-listeners:
-  - name: web
-    protocol: tcp
-    listen: ":80"
-    forward: "localhost:80"
-default: maybe
-`,
-			want: `must be "allow" or "deny"`,
-		},
-		{
 			name: "missing listener protocol",
 			yaml: `
 tailscale:
@@ -213,46 +132,6 @@ listeners:
     listen: ":80"
 `,
 			want: "forward is required",
-		},
-		{
-			name: "invalid host wildcard - middle",
-			yaml: `
-tailscale:
-  hostname: test
-listeners:
-  - name: web
-    protocol: tcp
-    listen: ":80"
-    forward: "localhost:80"
-l7_rules:
-  - match:
-      listener: web
-      path: "/*"
-      host: "foo.*.bar"
-    allow:
-      any_tailscale: true
-`,
-			want: "wildcard must be *.domain form",
-		},
-		{
-			name: "invalid host wildcard - multiple stars",
-			yaml: `
-tailscale:
-  hostname: test
-listeners:
-  - name: web
-    protocol: tcp
-    listen: ":80"
-    forward: "localhost:80"
-l7_rules:
-  - match:
-      listener: web
-      path: "/*"
-      host: "**.example.com"
-    allow:
-      any_tailscale: true
-`,
-			want: "wildcard must be *.domain form",
 		},
 	}
 
@@ -357,9 +236,6 @@ tailscale:
 	if len(cfg.Listeners) != 0 {
 		t.Errorf("expected 0 listeners, got %d", len(cfg.Listeners))
 	}
-	if cfg.Default != "deny" {
-		t.Errorf("default = %q, want %q", cfg.Default, "deny")
-	}
 }
 
 func TestParse_ListenerEmptyForward(t *testing.T) {
@@ -381,90 +257,19 @@ listeners:
 	}
 }
 
-func TestParse_DuplicateL4RulesForSameListener(t *testing.T) {
-	// Duplicate L4 rules for the same listener are valid — the engine uses first-match.
-	data := []byte(`
-tailscale:
-  hostname: test
-listeners:
-  - name: web
-    protocol: tcp
-    listen: ":80"
-    forward: "localhost:80"
-l4_rules:
-  - match:
-      listener: web
-    allow:
-      users: ["alice@company.com"]
-  - match:
-      listener: web
-    allow:
-      any_tailscale: true
-`)
-	cfg, err := Parse(data)
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-	if len(cfg.L4Rules) != 2 {
-		t.Errorf("expected 2 l4_rules, got %d", len(cfg.L4Rules))
-	}
-}
-
-func TestParse_L7RuleWithPathButNoListener(t *testing.T) {
-	// L7 rule referencing a listener that doesn't exist.
-	data := []byte(`
-tailscale:
-  hostname: test
-listeners:
-  - name: web
-    protocol: tcp
-    listen: ":80"
-    forward: "localhost:80"
-l7_rules:
-  - match:
-      listener: nonexistent
-      path: "/api/*"
-    allow:
-      any_tailscale: true
-`)
-	_, err := Parse(data)
-	if err == nil {
-		t.Fatal("expected error for L7 rule with unknown listener")
-	}
-	if !contains(err.Error(), "unknown listener") {
-		t.Errorf("error = %q, want substring %q", err.Error(), "unknown listener")
-	}
-}
-
 func TestParse_VeryLargeConfig(t *testing.T) {
-	// Build a config with 50 listeners and 100 rules.
 	var b strings.Builder
 	b.WriteString("tailscale:\n  hostname: large\nlisteners:\n")
-	for i := 0; i < 50; i++ {
+	for i := 0; i < 200; i++ {
 		fmt.Fprintf(&b, "  - name: svc-%d\n    protocol: tcp\n    listen: \":%d\"\n    forward: \"localhost:%d\"\n", i, 8000+i, 9000+i)
 	}
-	b.WriteString("l4_rules:\n")
-	for i := 0; i < 50; i++ {
-		fmt.Fprintf(&b, "  - match:\n      listener: svc-%d\n    allow:\n      tags: [\"tag:svc-%d\"]\n", i, i)
-	}
-	b.WriteString("l7_rules:\n")
-	for i := 0; i < 50; i++ {
-		fmt.Fprintf(&b, "  - match:\n      listener: svc-%d\n      path: \"/api/*\"\n    allow:\n      users: [\"user-%d@example.com\"]\n", i, i)
-	}
-	b.WriteString("default: deny\n")
 
 	cfg, err := Parse([]byte(b.String()))
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if len(cfg.Listeners) != 50 {
-		t.Errorf("expected 50 listeners, got %d", len(cfg.Listeners))
-	}
-	if len(cfg.L4Rules) != 50 {
-		t.Errorf("expected 50 l4_rules, got %d", len(cfg.L4Rules))
-	}
-	if len(cfg.L7Rules) != 50 {
-		t.Errorf("expected 50 l7_rules, got %d", len(cfg.L7Rules))
+	if len(cfg.Listeners) != 200 {
+		t.Errorf("expected 200 listeners, got %d", len(cfg.Listeners))
 	}
 }
 
@@ -489,15 +294,6 @@ tailscale:
 	}
 	if len(cfg.Listeners) != 0 {
 		t.Errorf("expected 0 listeners, got %d", len(cfg.Listeners))
-	}
-	if len(cfg.L4Rules) != 0 {
-		t.Errorf("expected 0 l4_rules, got %d", len(cfg.L4Rules))
-	}
-	if len(cfg.L7Rules) != 0 {
-		t.Errorf("expected 0 l7_rules, got %d", len(cfg.L7Rules))
-	}
-	if cfg.Default != "deny" {
-		t.Errorf("default = %q, want %q", cfg.Default, "deny")
 	}
 }
 
@@ -594,127 +390,6 @@ listeners:
 	}
 	if cfg.Tailscale.AuthKey != "${}" {
 		t.Errorf("authkey = %q, want %q (literal, not expanded)", cfg.Tailscale.AuthKey, "${}")
-	}
-}
-
-func TestParse_HostAndMethodsParsing(t *testing.T) {
-	data := []byte(`
-tailscale:
-  hostname: test
-listeners:
-  - name: web
-    protocol: tcp
-    listen: ":80"
-    forward: "localhost:80"
-l7_rules:
-  - match:
-      listener: web
-      path: "/*"
-      host: "*.example.com"
-      methods: ["get", "post"]
-    allow:
-      any_tailscale: true
-`)
-	cfg, err := Parse(data)
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-	if got := cfg.L7Rules[0].Match.Host; got != "*.example.com" {
-		t.Errorf("host = %q, want %q", got, "*.example.com")
-	}
-	wantMethods := []string{"GET", "POST"}
-	gotMethods := cfg.L7Rules[0].Match.Methods
-	if len(gotMethods) != len(wantMethods) {
-		t.Fatalf("methods len = %d, want %d", len(gotMethods), len(wantMethods))
-	}
-	for i := range wantMethods {
-		if gotMethods[i] != wantMethods[i] {
-			t.Errorf("methods[%d] = %q, want %q", i, gotMethods[i], wantMethods[i])
-		}
-	}
-}
-
-func TestParse_BackwardCompat_NoHostMethods(t *testing.T) {
-	data := []byte(`
-tailscale:
-  hostname: test
-listeners:
-  - name: web
-    protocol: tcp
-    listen: ":80"
-    forward: "localhost:80"
-l7_rules:
-  - match:
-      listener: web
-      path: "/*"
-    allow:
-      any_tailscale: true
-`)
-	cfg, err := Parse(data)
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-	if got := cfg.L7Rules[0].Match.Host; got != "" {
-		t.Errorf("host = %q, want empty string", got)
-	}
-	if got := cfg.L7Rules[0].Match.Methods; len(got) != 0 {
-		t.Errorf("methods = %v, want nil or empty", got)
-	}
-}
-
-func TestParse_ValidHostWildcard(t *testing.T) {
-	data := []byte(`
-tailscale:
-  hostname: test
-listeners:
-  - name: web
-    protocol: tcp
-    listen: ":80"
-    forward: "localhost:80"
-l7_rules:
-  - match:
-      listener: web
-      path: "/*"
-      host: "*.example.com"
-    allow:
-      any_tailscale: true
-`)
-	_, err := Parse(data)
-	if err != nil {
-		t.Fatalf("expected no error for valid wildcard host, got: %v", err)
-	}
-}
-
-func TestParse_MethodNormalization(t *testing.T) {
-	data := []byte(`
-tailscale:
-  hostname: test
-listeners:
-  - name: web
-    protocol: tcp
-    listen: ":80"
-    forward: "localhost:80"
-l7_rules:
-  - match:
-      listener: web
-      path: "/*"
-      methods: ["get", "Post", "DELETE"]
-    allow:
-      any_tailscale: true
-`)
-	cfg, err := Parse(data)
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-	wantMethods := []string{"GET", "POST", "DELETE"}
-	gotMethods := cfg.L7Rules[0].Match.Methods
-	if len(gotMethods) != len(wantMethods) {
-		t.Fatalf("methods len = %d, want %d", len(gotMethods), len(wantMethods))
-	}
-	for i := range wantMethods {
-		if gotMethods[i] != wantMethods[i] {
-			t.Errorf("methods[%d] = %q, want %q", i, gotMethods[i], wantMethods[i])
-		}
 	}
 }
 

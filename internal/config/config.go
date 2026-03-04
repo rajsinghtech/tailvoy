@@ -103,6 +103,12 @@ func (c *Config) validate() error {
 		if l.Forward == "" {
 			return fmt.Errorf("listeners[%d].forward is required", i)
 		}
+		switch l.ProxyProtocol {
+		case "", "v2":
+			// valid
+		default:
+			return fmt.Errorf("listeners[%d].proxy_protocol must be empty or \"v2\", got %q", i, l.ProxyProtocol)
+		}
 		if _, exists := listenerNames[l.Name]; exists {
 			return fmt.Errorf("duplicate listener name: %q", l.Name)
 		}

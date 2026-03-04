@@ -12,83 +12,54 @@ import (
 // standalone mode (no xDS). Each listener in cfg gets an Envoy listener and
 // backend cluster. L7 listeners use HTTP Connection Manager with ext_authz;
 // L4 listeners use TCP proxy.
-// EnvoyInternalPort returns the internal port Envoy should listen on for a
+
+// envoyInternalPort returns the internal port Envoy should listen on for a
 // given listener in standalone mode. This uses port + 10000 to avoid conflicts
 // with the tsnet listener on the same port number.
-func EnvoyInternalPort(listenPort string) int {
+func envoyInternalPort(listenPort string) int {
 	return portInt(listenPort) + 10000
 }
 
-func GenerateStandaloneConfig(cfg *config.Config, authzAddr string) (string, error) {
-	authzHost, authzPort := splitHostPort(authzAddr)
+// StandaloneOverride describes the forward address and proxy protocol that
+// the tsnet listener should use when routing through Envoy in standalone mode.
+type StandaloneOverride struct {
+	Forward       string
+	ProxyProtocol string
+}
 
+// GenerateStandaloneResult holds the Envoy bootstrap YAML and per-listener
+// forwarding overrides for standalone mode.
+type GenerateStandaloneResult struct {
+	BootstrapYAML string
+	Overrides     map[string]StandaloneOverride
+}
+
+func GenerateStandaloneConfig(cfg *config.Config, authzAddr string) (*GenerateStandaloneResult, error) {
 	listeners := make([]map[string]interface{}, 0, len(cfg.Listeners))
 	clusters := make([]map[string]interface{}, 0, len(cfg.Listeners)+1)
+	overrides := make(map[string]StandaloneOverride)
 
 	for _, l := range cfg.Listeners {
 		backendName := l.Name + "_backend"
 		fwdHost, fwdPort := splitHostPort(l.Forward)
 
 		if l.L7Policy {
-			// Envoy listens on internal port (port + 10000), tailvoy forwards here
 			listener := buildHTTPListener(l, backendName)
 			listeners = append(listeners, listener)
+			internalPort := envoyInternalPort(l.Port())
+			overrides[l.Name] = StandaloneOverride{
+				Forward:       fmt.Sprintf("127.0.0.1:%d", internalPort),
+				ProxyProtocol: "v2",
+			}
 		} else {
 			listener := buildTCPListener(l, backendName)
 			listeners = append(listeners, listener)
 		}
 
-		clusters = append(clusters, map[string]interface{}{
-			"name":            backendName,
-			"connect_timeout": "5s",
-			"type":            "STRICT_DNS",
-			"load_assignment": map[string]interface{}{
-				"cluster_name": backendName,
-				"endpoints": []interface{}{
-					map[string]interface{}{
-						"lb_endpoints": []interface{}{
-							map[string]interface{}{
-								"endpoint": map[string]interface{}{
-									"address": map[string]interface{}{
-										"socket_address": map[string]interface{}{
-											"address":    fwdHost,
-											"port_value": portInt(fwdPort),
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-		})
+		clusters = append(clusters, buildCluster(backendName, fwdHost, fwdPort, "5s"))
 	}
 
-	// ext_authz cluster
-	clusters = append(clusters, map[string]interface{}{
-		"name":            "tailvoy_ext_authz",
-		"connect_timeout": "1s",
-		"type":            "STRICT_DNS",
-		"load_assignment": map[string]interface{}{
-			"cluster_name": "tailvoy_ext_authz",
-			"endpoints": []interface{}{
-				map[string]interface{}{
-					"lb_endpoints": []interface{}{
-						map[string]interface{}{
-							"endpoint": map[string]interface{}{
-								"address": map[string]interface{}{
-									"socket_address": map[string]interface{}{
-										"address":    authzHost,
-										"port_value": portInt(authzPort),
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-	})
+	clusters = append(clusters, buildExtAuthzCluster(authzAddr))
 
 	bootstrap := map[string]interface{}{
 		"admin": map[string]interface{}{
@@ -107,9 +78,12 @@ func GenerateStandaloneConfig(cfg *config.Config, authzAddr string) (string, err
 
 	out, err := yaml.Marshal(bootstrap)
 	if err != nil {
-		return "", fmt.Errorf("marshal envoy bootstrap: %w", err)
+		return nil, fmt.Errorf("marshal envoy bootstrap: %w", err)
 	}
-	return string(out), nil
+	return &GenerateStandaloneResult{
+		BootstrapYAML: string(out),
+		Overrides:     overrides,
+	}, nil
 }
 
 // InjectExtAuthz takes existing Envoy bootstrap YAML and injects an ext_authz
@@ -130,33 +104,9 @@ func InjectExtAuthz(bootstrapYAML string, authzAddr string) (string, error) {
 		return "", fmt.Errorf("listeners not found or invalid")
 	}
 
-	// Add ext_authz cluster if not already present.
-	authzHost, authzPort := splitHostPort(authzAddr)
+	// Add ext_authz cluster.
 	clusters, _ := sr["clusters"].([]interface{})
-	clusters = append(clusters, map[string]interface{}{
-		"name":            "tailvoy_ext_authz",
-		"connect_timeout": "1s",
-		"type":            "STRICT_DNS",
-		"load_assignment": map[string]interface{}{
-			"cluster_name": "tailvoy_ext_authz",
-			"endpoints": []interface{}{
-				map[string]interface{}{
-					"lb_endpoints": []interface{}{
-						map[string]interface{}{
-							"endpoint": map[string]interface{}{
-								"address": map[string]interface{}{
-									"socket_address": map[string]interface{}{
-										"address":    authzHost,
-										"port_value": portInt(authzPort),
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-	})
+	clusters = append(clusters, buildExtAuthzCluster(authzAddr))
 	sr["clusters"] = clusters
 
 	for _, rawL := range listeners {
@@ -210,8 +160,42 @@ func InjectExtAuthz(bootstrapYAML string, authzAddr string) (string, error) {
 	return string(out), nil
 }
 
+// buildCluster creates a STRICT_DNS cluster pointing to host:port.
+func buildCluster(name, host, port, timeout string) map[string]interface{} {
+	return map[string]interface{}{
+		"name":            name,
+		"connect_timeout": timeout,
+		"type":            "STRICT_DNS",
+		"load_assignment": map[string]interface{}{
+			"cluster_name": name,
+			"endpoints": []interface{}{
+				map[string]interface{}{
+					"lb_endpoints": []interface{}{
+						map[string]interface{}{
+							"endpoint": map[string]interface{}{
+								"address": map[string]interface{}{
+									"socket_address": map[string]interface{}{
+										"address":    host,
+										"port_value": portInt(port),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+// buildExtAuthzCluster creates the ext_authz cluster from an address like "host:port".
+func buildExtAuthzCluster(authzAddr string) map[string]interface{} {
+	host, port := splitHostPort(authzAddr)
+	return buildCluster("tailvoy_ext_authz", host, port, "1s")
+}
+
 func buildHTTPListener(l config.Listener, backendCluster string) map[string]interface{} {
-	envoyPort := EnvoyInternalPort(l.Port())
+	envoyPort := envoyInternalPort(l.Port())
 	return map[string]interface{}{
 		"name": l.Name,
 		"address": map[string]interface{}{

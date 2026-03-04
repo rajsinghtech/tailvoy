@@ -458,12 +458,6 @@ func TestXFFTakesPrecedenceOverEnvoyHeader(t *testing.T) {
 
 func TestResolverErrorOnSecondCall(t *testing.T) {
 	// First call succeeds, second call (different IP) fails.
-	// Uses a custom mockWhoIs that tracks call count.
-	type failingMock struct {
-		callCount int
-	}
-
-	callCount := 0
 	mock := &mockWhoIs{
 		responses: map[string]*apitype.WhoIsResponse{
 			"100.64.1.1": aliceResp,
@@ -501,7 +495,6 @@ func TestResolverErrorOnSecondCall(t *testing.T) {
 	if rec3.Code != http.StatusOK {
 		t.Fatalf("third request (cached): expected 200, got %d", rec3.Code)
 	}
-	_ = callCount // suppress unused warning for clarity
 }
 
 func TestGracefulShutdownWhileRequestInFlight(t *testing.T) {

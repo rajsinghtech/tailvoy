@@ -123,22 +123,21 @@ func run(args []string) error {
 
 	// Standalone mode: generate envoy bootstrap config from policy.
 	if *standalone {
-		bootstrapYAML, err := envoy.GenerateStandaloneConfig(cfg, *authzAddr)
+		result, err := envoy.GenerateStandaloneConfig(cfg, *authzAddr)
 		if err != nil {
 			cancel()
 			wg.Wait()
 			return fmt.Errorf("generate envoy config: %w", err)
 		}
 
-		// Override forward address for L7 listeners to route through Envoy.
+		// Apply L7 forwarding overrides so tsnet routes through Envoy.
 		for i := range cfg.Listeners {
-			if cfg.Listeners[i].L7Policy {
-				internalPort := envoy.EnvoyInternalPort(cfg.Listeners[i].Port())
-				cfg.Listeners[i].Forward = fmt.Sprintf("127.0.0.1:%d", internalPort)
-				cfg.Listeners[i].ProxyProtocol = "v2"
+			if ov, ok := result.Overrides[cfg.Listeners[i].Name]; ok {
+				cfg.Listeners[i].Forward = ov.Forward
+				cfg.Listeners[i].ProxyProtocol = ov.ProxyProtocol
 				logger.Info("standalone: routing L7 listener through envoy",
 					"name", cfg.Listeners[i].Name,
-					"envoy_addr", cfg.Listeners[i].Forward,
+					"envoy_addr", ov.Forward,
 				)
 			}
 		}
@@ -151,7 +150,7 @@ func run(args []string) error {
 		}
 		defer os.Remove(tmpFile.Name())
 
-		if _, err := tmpFile.WriteString(bootstrapYAML); err != nil {
+		if _, err := tmpFile.WriteString(result.BootstrapYAML); err != nil {
 			tmpFile.Close()
 			cancel()
 			wg.Wait()

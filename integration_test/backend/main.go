@@ -33,5 +33,8 @@ func main() {
 		json.NewEncoder(w).Encode(resp)
 	})
 	fmt.Printf("backend listening on :%s\n", port)
-	http.ListenAndServe(":"+port, nil)
+	if err := http.ListenAndServe(":"+port, nil); err != nil {
+		fmt.Fprintf(os.Stderr, "listen: %v\n", err)
+		os.Exit(1)
+	}
 }

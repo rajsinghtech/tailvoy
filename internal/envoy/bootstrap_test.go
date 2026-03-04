@@ -33,7 +33,7 @@ func TestGenerateStandaloneConfig(t *testing.T) {
 		Default: "deny",
 	}
 
-	out, err := GenerateStandaloneConfig(cfg, "127.0.0.1:10000")
+	result, err := GenerateStandaloneConfig(cfg, "127.0.0.1:10000")
 	if err != nil {
 		t.Fatalf("GenerateStandaloneConfig: %v", err)
 	}
@@ -47,17 +47,30 @@ func TestGenerateStandaloneConfig(t *testing.T) {
 		"http_connection_manager",
 		"tcp_proxy",
 	} {
-		if !strings.Contains(out, want) {
+		if !strings.Contains(result.BootstrapYAML, want) {
 			t.Errorf("output missing %q", want)
 		}
 	}
 
 	// Verify admin is present
-	if !strings.Contains(out, "9901") {
+	if !strings.Contains(result.BootstrapYAML, "9901") {
 		t.Error("output missing admin port 9901")
 	}
 
-	t.Logf("Generated config:\n%s", out)
+	// Verify overrides for L7 listener
+	if ov, ok := result.Overrides["web"]; !ok {
+		t.Error("missing override for L7 listener 'web'")
+	} else {
+		if ov.ProxyProtocol != "v2" {
+			t.Errorf("override proxy_protocol = %q, want v2", ov.ProxyProtocol)
+		}
+	}
+	// L4 listener should not have an override
+	if _, ok := result.Overrides["db"]; ok {
+		t.Error("L4 listener 'db' should not have an override")
+	}
+
+	t.Logf("Generated config:\n%s", result.BootstrapYAML)
 }
 
 func TestGenerateStandaloneConfigOnlyL7(t *testing.T) {
@@ -70,13 +83,13 @@ func TestGenerateStandaloneConfigOnlyL7(t *testing.T) {
 		Default: "deny",
 	}
 
-	out, err := GenerateStandaloneConfig(cfg, "127.0.0.1:10000")
+	result, err := GenerateStandaloneConfig(cfg, "127.0.0.1:10000")
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	var bootstrap map[string]interface{}
-	if err := yaml.Unmarshal([]byte(out), &bootstrap); err != nil {
+	if err := yaml.Unmarshal([]byte(result.BootstrapYAML), &bootstrap); err != nil {
 		t.Fatalf("generated YAML is not parseable: %v", err)
 	}
 
@@ -121,7 +134,7 @@ func TestGenerateStandaloneConfigOnlyL7(t *testing.T) {
 	}
 
 	// No tcp_proxy should be present
-	if strings.Contains(out, "tcp_proxy") {
+	if strings.Contains(result.BootstrapYAML, "tcp_proxy") {
 		t.Error("L7-only config should not contain tcp_proxy")
 	}
 }
@@ -136,13 +149,13 @@ func TestGenerateStandaloneConfigOnlyL4(t *testing.T) {
 		Default: "deny",
 	}
 
-	out, err := GenerateStandaloneConfig(cfg, "127.0.0.1:10000")
+	result, err := GenerateStandaloneConfig(cfg, "127.0.0.1:10000")
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	var bootstrap map[string]interface{}
-	if err := yaml.Unmarshal([]byte(out), &bootstrap); err != nil {
+	if err := yaml.Unmarshal([]byte(result.BootstrapYAML), &bootstrap); err != nil {
 		t.Fatalf("generated YAML not parseable: %v", err)
 	}
 
@@ -182,10 +195,10 @@ func TestGenerateStandaloneConfigOnlyL4(t *testing.T) {
 	}
 
 	// No http_connection_manager or proxy_protocol should be present
-	if strings.Contains(out, "http_connection_manager") {
+	if strings.Contains(result.BootstrapYAML, "http_connection_manager") {
 		t.Error("L4-only config should not contain http_connection_manager")
 	}
-	if strings.Contains(out, "proxy_protocol") {
+	if strings.Contains(result.BootstrapYAML, "proxy_protocol") {
 		t.Error("L4-only config should not contain proxy_protocol")
 	}
 }
@@ -200,13 +213,13 @@ func TestGenerateStandaloneConfigMixed(t *testing.T) {
 		Default: "deny",
 	}
 
-	out, err := GenerateStandaloneConfig(cfg, "127.0.0.1:10000")
+	result, err := GenerateStandaloneConfig(cfg, "127.0.0.1:10000")
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	var bootstrap map[string]interface{}
-	if err := yaml.Unmarshal([]byte(out), &bootstrap); err != nil {
+	if err := yaml.Unmarshal([]byte(result.BootstrapYAML), &bootstrap); err != nil {
 		t.Fatalf("YAML not parseable: %v", err)
 	}
 
@@ -217,10 +230,10 @@ func TestGenerateStandaloneConfigMixed(t *testing.T) {
 	}
 
 	// Both http_connection_manager and tcp_proxy should be present
-	if !strings.Contains(out, "http_connection_manager") {
+	if !strings.Contains(result.BootstrapYAML, "http_connection_manager") {
 		t.Error("missing http_connection_manager")
 	}
-	if !strings.Contains(out, "tcp_proxy") {
+	if !strings.Contains(result.BootstrapYAML, "tcp_proxy") {
 		t.Error("missing tcp_proxy")
 	}
 }
@@ -239,13 +252,13 @@ func TestGenerateStandaloneConfigManyListeners(t *testing.T) {
 		Default: "deny",
 	}
 
-	out, err := GenerateStandaloneConfig(cfg, "127.0.0.1:10000")
+	result, err := GenerateStandaloneConfig(cfg, "127.0.0.1:10000")
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	var bootstrap map[string]interface{}
-	if err := yaml.Unmarshal([]byte(out), &bootstrap); err != nil {
+	if err := yaml.Unmarshal([]byte(result.BootstrapYAML), &bootstrap); err != nil {
 		t.Fatalf("YAML not parseable: %v", err)
 	}
 
@@ -264,7 +277,7 @@ func TestGenerateStandaloneConfigManyListeners(t *testing.T) {
 	// Verify each listener has a corresponding backend cluster
 	for i := 1; i <= 6; i++ {
 		wantCluster := "l" + string(rune('0'+i)) + "_backend"
-		if !strings.Contains(out, wantCluster) {
+		if !strings.Contains(result.BootstrapYAML, wantCluster) {
 			t.Errorf("missing backend cluster %q", wantCluster)
 		}
 	}
@@ -279,13 +292,13 @@ func TestGenerateStandaloneConfigExtAuthzCluster(t *testing.T) {
 		Default: "deny",
 	}
 
-	out, err := GenerateStandaloneConfig(cfg, "10.0.0.5:9999")
+	result, err := GenerateStandaloneConfig(cfg, "10.0.0.5:9999")
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	var bootstrap map[string]interface{}
-	if err := yaml.Unmarshal([]byte(out), &bootstrap); err != nil {
+	if err := yaml.Unmarshal([]byte(result.BootstrapYAML), &bootstrap); err != nil {
 		t.Fatal(err)
 	}
 
@@ -329,13 +342,13 @@ func TestGenerateStandaloneConfigHTTPListenerHasProxyProtocol(t *testing.T) {
 		Default: "deny",
 	}
 
-	out, err := GenerateStandaloneConfig(cfg, "127.0.0.1:10000")
+	result, err := GenerateStandaloneConfig(cfg, "127.0.0.1:10000")
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	var bootstrap map[string]interface{}
-	if err := yaml.Unmarshal([]byte(out), &bootstrap); err != nil {
+	if err := yaml.Unmarshal([]byte(result.BootstrapYAML), &bootstrap); err != nil {
 		t.Fatal(err)
 	}
 
@@ -363,13 +376,13 @@ func TestGenerateStandaloneConfigHTTPListenerHasExtAuthzHTTPFilter(t *testing.T)
 		Default: "deny",
 	}
 
-	out, err := GenerateStandaloneConfig(cfg, "127.0.0.1:10000")
+	result, err := GenerateStandaloneConfig(cfg, "127.0.0.1:10000")
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	var bootstrap map[string]interface{}
-	if err := yaml.Unmarshal([]byte(out), &bootstrap); err != nil {
+	if err := yaml.Unmarshal([]byte(result.BootstrapYAML), &bootstrap); err != nil {
 		t.Fatal(err)
 	}
 
@@ -456,14 +469,14 @@ func TestGenerateStandaloneConfigYAMLRoundTrip(t *testing.T) {
 		Default: "deny",
 	}
 
-	out, err := GenerateStandaloneConfig(cfg, "127.0.0.1:10000")
+	result, err := GenerateStandaloneConfig(cfg, "127.0.0.1:10000")
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Verify generated YAML can be round-tripped
 	var parsed map[string]interface{}
-	if err := yaml.Unmarshal([]byte(out), &parsed); err != nil {
+	if err := yaml.Unmarshal([]byte(result.BootstrapYAML), &parsed); err != nil {
 		t.Fatalf("generated YAML is not valid: %v", err)
 	}
 
@@ -488,13 +501,13 @@ func TestGenerateStandaloneConfigPort0(t *testing.T) {
 		Default: "deny",
 	}
 
-	out, err := GenerateStandaloneConfig(cfg, "127.0.0.1:10000")
+	result, err := GenerateStandaloneConfig(cfg, "127.0.0.1:10000")
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	var bootstrap map[string]interface{}
-	if err := yaml.Unmarshal([]byte(out), &bootstrap); err != nil {
+	if err := yaml.Unmarshal([]byte(result.BootstrapYAML), &bootstrap); err != nil {
 		t.Fatal(err)
 	}
 
@@ -517,13 +530,13 @@ func TestGenerateStandaloneConfigNoListeners(t *testing.T) {
 		Default:   "deny",
 	}
 
-	out, err := GenerateStandaloneConfig(cfg, "127.0.0.1:10000")
+	result, err := GenerateStandaloneConfig(cfg, "127.0.0.1:10000")
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	var bootstrap map[string]interface{}
-	if err := yaml.Unmarshal([]byte(out), &bootstrap); err != nil {
+	if err := yaml.Unmarshal([]byte(result.BootstrapYAML), &bootstrap); err != nil {
 		t.Fatalf("YAML not parseable: %v", err)
 	}
 
@@ -1027,9 +1040,9 @@ func TestEnvoyInternalPort(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		got := EnvoyInternalPort(tt.port)
+		got := envoyInternalPort(tt.port)
 		if got != tt.want {
-			t.Errorf("EnvoyInternalPort(%q) = %d, want %d", tt.port, got, tt.want)
+			t.Errorf("envoyInternalPort(%q) = %d, want %d", tt.port, got, tt.want)
 		}
 	}
 }

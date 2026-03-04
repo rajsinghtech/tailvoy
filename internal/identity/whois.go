@@ -44,11 +44,30 @@ type Resolver struct {
 }
 
 // NewResolver creates a Resolver backed by the given WhoIsClient.
+// It starts a background goroutine that evicts expired cache entries.
 func NewResolver(client WhoIsClient) *Resolver {
-	return &Resolver{
+	r := &Resolver{
 		client: client,
 		cache:  make(map[netip.Addr]*cacheEntry),
 		now:    time.Now,
+	}
+	go r.evictLoop()
+	return r
+}
+
+// evictLoop periodically removes expired cache entries.
+func (r *Resolver) evictLoop() {
+	ticker := time.NewTicker(cacheTTL)
+	defer ticker.Stop()
+	for range ticker.C {
+		r.mu.Lock()
+		now := r.now()
+		for k, v := range r.cache {
+			if now.After(v.expiresAt) {
+				delete(r.cache, k)
+			}
+		}
+		r.mu.Unlock()
 	}
 }
 

@@ -1,5 +1,5 @@
 tailscale:
-  hostname: "tailvoy-full-test"
+  hostname: "tailvoy-docker-test"
   authkey: "${TS_AUTHKEY}"
   ephemeral: true
 
@@ -10,26 +10,17 @@ listeners:
     forward: "backend:8080"
     l7_policy: true
 
-  - name: open-tcp
+  - name: tcp
     protocol: tcp
-    listen: ":8081"
-    forward: "backend:8080"
-    l7_policy: false
+    listen: ":5432"
+    forward: "tcp-echo:9000"
 
-  - name: user-restricted
-    protocol: tcp
-    listen: ":8082"
-    forward: "backend:8080"
-    l7_policy: false
+  - name: udp
+    protocol: udp
+    listen: ":9053"
+    forward: "udp-echo:9053"
 
-  - name: tag-restricted
+  - name: no-access
     protocol: tcp
-    listen: ":8083"
+    listen: ":9999"
     forward: "backend:8080"
-    l7_policy: false
-
-  - name: passthrough
-    protocol: tcp
-    listen: ":8084"
-    forward: "backend:8080"
-    l7_policy: false

@@ -2,8 +2,14 @@ services:
   backend:
     build:
       context: ./backend
-    ports:
-      - "18080:8080"
+
+  tcp-echo:
+    build:
+      context: ./backend/tcp-echo
+
+  udp-echo:
+    build:
+      context: ./backend/udp-echo
 
   tailvoy:
     build:
@@ -21,3 +27,5 @@ services:
       - ./full-test-policy.yaml:/policy.yaml:ro
     depends_on:
       - backend
+      - tcp-echo
+      - udp-echo

@@ -152,9 +152,43 @@ jobs:
             eg-controller.log
           retention-days: 7
 
+  docker-test:
+    needs: setup-tailnet
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          authkey: ${{ needs.setup-tailnet.outputs.ts_authkey }}
+
+      - name: Install ncat
+        run: sudo apt-get install -y ncat
+
+      - name: Run docker-compose integration tests
+        env:
+          TS_AUTHKEY: ${{ needs.setup-tailnet.outputs.ts_authkey }}
+        run: make integration-test
+
+      - name: Collect logs on failure
+        if: failure()
+        run: |
+          cd integration_test && docker compose -f docker-compose-full.yaml logs > docker-compose.log 2>&1 || true
+
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: docker-test-logs
+          path: integration_test/docker-compose.log
+          retention-days: 7
+
   cleanup-tailnet:
     if: always()
-    needs: [setup-tailnet, kind-test]
+    needs: [setup-tailnet, kind-test, docker-test]
     runs-on: ubuntu-latest
     timeout-minutes: 5
 

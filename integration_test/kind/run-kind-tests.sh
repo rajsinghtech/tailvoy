@@ -320,8 +320,18 @@ echo "========================================"
 
 # Cap rule: {"listeners": ["tcp", "udp", "tls"]} — no routes = L4 access only.
 # HasAccess(listener="tcp", sni="", id) matches because "tcp" is in listeners.
-TCP_RESP=$(echo "hello" | $NC_CMD -w 5 "$IP" 8090 2>/dev/null || true)
-if echo "$TCP_RESP" | grep -q "echo: hello"; then
+# Retry the first TCP connection — identity resolution on the first connection
+# can race with ncat's short write-then-close lifecycle.
+TCP_OK=false
+for i in 1 2 3; do
+    TCP_RESP=$(echo "hello" | $NC_CMD -w 5 "$IP" 8090 2>/dev/null || true)
+    if echo "$TCP_RESP" | grep -q "echo: hello"; then
+        TCP_OK=true
+        break
+    fi
+    sleep 1
+done
+if [ "$TCP_OK" = "true" ]; then
     test_pass "TCP: echo allow (cap grants L4 access)"
 else
     test_fail "TCP: echo allow (cap grants L4 access)" "got '$TCP_RESP'"

@@ -36,7 +36,9 @@ func (m *mockWhoIs) WhoIs(ctx context.Context, addr string) (*apitype.WhoIsRespo
 // the given route patterns. Use "/*" for full access.
 func tailvoyCapMap(routes ...string) tailcfg.PeerCapMap {
 	type capRule struct {
-		Routes []string `json:"routes,omitempty"`
+		Listeners []string `json:"listeners,omitempty"`
+		Routes    []string `json:"routes,omitempty"`
+		Hostnames []string `json:"hostnames,omitempty"`
 	}
 	rule := capRule{Routes: routes}
 	b, _ := json.Marshal(rule)

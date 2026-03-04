@@ -75,33 +75,22 @@ func startGRPC(t *testing.T, srv *Server) authv3.AuthorizationClient {
 	return authv3.NewAuthorizationClient(conn)
 }
 
-// checkReq builds a CheckRequest with the given headers and path.
-func checkReq(headers map[string]string, path string) *authv3.CheckRequest {
-	return &authv3.CheckRequest{
-		Attributes: &authv3.AttributeContext{
-			Request: &authv3.AttributeContext_Request{
-				Http: &authv3.AttributeContext_HttpRequest{
-					Headers: headers,
-					Path:    path,
-				},
-			},
-		},
+// checkReq builds a CheckRequest with the given headers, path, and optional context extensions.
+func checkReq(headers map[string]string, path string, contextExt ...map[string]string) *authv3.CheckRequest {
+	var ext map[string]string
+	if len(contextExt) > 0 {
+		ext = contextExt[0]
 	}
-}
-
-// checkReqWithContext builds a CheckRequest with headers, path, and context extensions.
-func checkReqWithContext(headers map[string]string, path string, contextExt map[string]string) *authv3.CheckRequest {
-	host := headers[":authority"]
 	return &authv3.CheckRequest{
 		Attributes: &authv3.AttributeContext{
 			Request: &authv3.AttributeContext_Request{
 				Http: &authv3.AttributeContext_HttpRequest{
 					Headers: headers,
 					Path:    path,
-					Host:    host,
+					Host:    headers[":authority"],
 				},
 			},
-			ContextExtensions: contextExt,
+			ContextExtensions: ext,
 		},
 	}
 }
@@ -504,7 +493,7 @@ func TestCheckWithListenerContextExtension(t *testing.T) {
 	client := startGRPC(t, srv)
 
 	// Matching listener -> allow.
-	r, err := client.Check(context.Background(), checkReqWithContext(
+	r, err := client.Check(context.Background(), checkReq(
 		map[string]string{"x-forwarded-for": "100.64.1.1"},
 		"/foo",
 		map[string]string{"listener": "http"},
@@ -517,7 +506,7 @@ func TestCheckWithListenerContextExtension(t *testing.T) {
 	}
 
 	// Non-matching listener -> deny.
-	r, err = client.Check(context.Background(), checkReqWithContext(
+	r, err = client.Check(context.Background(), checkReq(
 		map[string]string{"x-forwarded-for": "100.64.1.1"},
 		"/foo",
 		map[string]string{"listener": "grpc"},
@@ -543,7 +532,7 @@ func TestCheckWithHostHeader(t *testing.T) {
 	client := startGRPC(t, srv)
 
 	// Matching host -> allow.
-	r, err := client.Check(context.Background(), checkReqWithContext(
+	r, err := client.Check(context.Background(), checkReq(
 		map[string]string{
 			"x-forwarded-for": "100.64.1.1",
 			":authority":      "api.example.com",
@@ -559,7 +548,7 @@ func TestCheckWithHostHeader(t *testing.T) {
 	}
 
 	// Non-matching host -> deny.
-	r, err = client.Check(context.Background(), checkReqWithContext(
+	r, err = client.Check(context.Background(), checkReq(
 		map[string]string{
 			"x-forwarded-for": "100.64.1.1",
 			":authority":      "other.example.com",
@@ -589,7 +578,7 @@ func TestCheckWithAllDimensions(t *testing.T) {
 	client := startGRPC(t, srv)
 
 	// All dimensions match -> allow.
-	r, err := client.Check(context.Background(), checkReqWithContext(
+	r, err := client.Check(context.Background(), checkReq(
 		map[string]string{
 			"x-forwarded-for": "100.64.1.1",
 			":authority":      "api.example.com",
@@ -605,7 +594,7 @@ func TestCheckWithAllDimensions(t *testing.T) {
 	}
 
 	// Wrong listener -> deny (AND semantics).
-	r, err = client.Check(context.Background(), checkReqWithContext(
+	r, err = client.Check(context.Background(), checkReq(
 		map[string]string{
 			"x-forwarded-for": "100.64.1.1",
 			":authority":      "api.example.com",
@@ -621,7 +610,7 @@ func TestCheckWithAllDimensions(t *testing.T) {
 	}
 
 	// Wrong host -> deny.
-	r, err = client.Check(context.Background(), checkReqWithContext(
+	r, err = client.Check(context.Background(), checkReq(
 		map[string]string{
 			"x-forwarded-for": "100.64.1.1",
 			":authority":      "other.example.com",
@@ -637,7 +626,7 @@ func TestCheckWithAllDimensions(t *testing.T) {
 	}
 
 	// Wrong path -> deny.
-	r, err = client.Check(context.Background(), checkReqWithContext(
+	r, err = client.Check(context.Background(), checkReq(
 		map[string]string{
 			"x-forwarded-for": "100.64.1.1",
 			":authority":      "api.example.com",

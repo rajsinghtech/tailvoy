@@ -90,10 +90,14 @@ func (lm *ListenerManager) handleConn(ctx context.Context, conn net.Conn, listen
 	var sni string
 	if !listenerCfg.L7Policy && listenerCfg.Protocol == "tcp" {
 		var reader io.Reader
-		sni, reader, _ = PeekSNI(conn)
-		if reader != nil {
-			conn = &readerConn{Conn: conn, reader: reader}
+		var peekErr error
+		sni, reader, peekErr = PeekSNI(conn)
+		if peekErr != nil {
+			lm.logger.Debug("SNI peek failed",
+				"listener", listenerCfg.Name, "remote", remoteAddr, "err", peekErr)
+			return
 		}
+		conn = &readerConn{Conn: conn, reader: reader}
 	}
 
 	if !lm.engine.HasAccess(listenerCfg.Name, sni, id) {

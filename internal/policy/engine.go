@@ -1,6 +1,9 @@
 package policy
 
-import "strings"
+import (
+	"slices"
+	"strings"
+)
 
 // Engine evaluates access based on peer capabilities.
 // Authorization data comes from the Identity (populated via WhoIs CapMap),
@@ -56,15 +59,7 @@ func ruleMatchesL7(rule CapRule, listener, hostname, path string) bool {
 // matchDimension returns true if values is empty (unrestricted) or target
 // appears in values.
 func matchDimension(values []string, target string) bool {
-	if len(values) == 0 {
-		return true
-	}
-	for _, v := range values {
-		if v == target {
-			return true
-		}
-	}
-	return false
+	return len(values) == 0 || slices.Contains(values, target)
 }
 
 // matchHostnameDimension returns true if patterns is empty (unrestricted) or
@@ -124,8 +119,8 @@ func matchPath(pattern, reqPath string) bool {
 	}
 
 	if strings.HasSuffix(pattern, "/*") {
-		prefix := strings.TrimSuffix(pattern, "*")
-		return strings.HasPrefix(reqPath, prefix) || reqPath == strings.TrimSuffix(prefix, "/")
+		prefix := pattern[:len(pattern)-1] // e.g. "/api/*" → "/api/"
+		return strings.HasPrefix(reqPath, prefix) || reqPath == pattern[:len(pattern)-2]
 	}
 
 	return pattern == reqPath

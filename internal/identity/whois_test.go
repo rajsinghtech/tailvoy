@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"net/netip"
 	"sync"
 	"testing"
@@ -553,13 +554,13 @@ func TestToIdentity_MultipleCapRules(t *testing.T) {
 	}
 	for i, r := range id.Rules {
 		w := want[i]
-		if fmt.Sprintf("%v", r.Listeners) != fmt.Sprintf("%v", w.Listeners) {
+		if !slices.Equal(r.Listeners, w.Listeners) {
 			t.Errorf("rule[%d].Listeners = %v, want %v", i, r.Listeners, w.Listeners)
 		}
-		if fmt.Sprintf("%v", r.Routes) != fmt.Sprintf("%v", w.Routes) {
+		if !slices.Equal(r.Routes, w.Routes) {
 			t.Errorf("rule[%d].Routes = %v, want %v", i, r.Routes, w.Routes)
 		}
-		if fmt.Sprintf("%v", r.Hostnames) != fmt.Sprintf("%v", w.Hostnames) {
+		if !slices.Equal(r.Hostnames, w.Hostnames) {
 			t.Errorf("rule[%d].Hostnames = %v, want %v", i, r.Hostnames, w.Hostnames)
 		}
 	}

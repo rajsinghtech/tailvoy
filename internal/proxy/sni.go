@@ -27,11 +27,11 @@ func PeekSNI(conn net.Conn) (string, io.Reader, error) {
 	buf := make([]byte, 16384)
 	n, err := conn.Read(buf)
 	if n == 0 {
-		return "", io.MultiReader(bytes.NewReader(buf[:0]), conn), err
+		return "", conn, err
 	}
-	buf = buf[:n]
-	sni := parseSNI(buf)
-	return sni, io.MultiReader(bytes.NewReader(buf), conn), nil
+	peeked := buf[:n]
+	sni := parseSNI(peeked)
+	return sni, io.MultiReader(bytes.NewReader(peeked), conn), nil
 }
 
 // parseSNI extracts the SNI hostname from raw TLS ClientHello bytes.

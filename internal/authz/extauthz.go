@@ -91,20 +91,20 @@ func allowResponse(id *policy.Identity) *authv3.CheckResponse {
 	}
 }
 
-func denyResponse() *authv3.CheckResponse {
-	return &authv3.CheckResponse{
-		Status: &rpcstatus.Status{Code: int32(codes.PermissionDenied)},
-		HttpResponse: &authv3.CheckResponse_DeniedResponse{
-			DeniedResponse: &authv3.DeniedHttpResponse{
-				Status: &typev3.HttpStatus{Code: typev3.StatusCode_Forbidden},
-				Headers: []*corev3.HeaderValueOption{
-					header("content-type", "application/json"),
-				},
-				Body: `{"error":"forbidden","message":"access denied by tailvoy policy"}`,
+var staticDenyResponse = &authv3.CheckResponse{
+	Status: &rpcstatus.Status{Code: int32(codes.PermissionDenied)},
+	HttpResponse: &authv3.CheckResponse_DeniedResponse{
+		DeniedResponse: &authv3.DeniedHttpResponse{
+			Status: &typev3.HttpStatus{Code: typev3.StatusCode_Forbidden},
+			Headers: []*corev3.HeaderValueOption{
+				header("content-type", "application/json"),
 			},
+			Body: `{"error":"forbidden","message":"access denied by tailvoy policy"}`,
 		},
-	}
+	},
 }
+
+func denyResponse() *authv3.CheckResponse { return staticDenyResponse }
 
 func header(key, value string) *corev3.HeaderValueOption {
 	return &corev3.HeaderValueOption{

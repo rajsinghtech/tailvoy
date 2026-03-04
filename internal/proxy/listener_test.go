@@ -1,0 +1,202 @@
+package proxy
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"log/slog"
+	"net"
+	"testing"
+	"time"
+
+	"tailscale.com/client/tailscale/apitype"
+	"tailscale.com/tailcfg"
+
+	"github.com/rajsinghtech/tailvoy/internal/config"
+	"github.com/rajsinghtech/tailvoy/internal/identity"
+	"github.com/rajsinghtech/tailvoy/internal/policy"
+)
+
+// mockWhoIs implements identity.WhoIsClient with a static response map keyed by IP.
+type mockWhoIs struct {
+	responses map[string]*apitype.WhoIsResponse
+}
+
+func (m *mockWhoIs) WhoIs(ctx context.Context, addr string) (*apitype.WhoIsResponse, error) {
+	ip := identity.StripPort(addr)
+	if resp, ok := m.responses[ip]; ok {
+		return resp, nil
+	}
+	return nil, fmt.Errorf("not found: %s", ip)
+}
+
+func TestListenerManagerAllowAndForward(t *testing.T) {
+	// 1. Start a TCP echo backend.
+	backend := startEchoServer(t)
+
+	// 2. Config with a listener pointing to the echo backend.
+	cfg := &config.Config{
+		Tailscale: config.TailscaleConfig{Hostname: "test"},
+		Listeners: []config.Listener{
+			{
+				Name:     "echo",
+				Protocol: "tcp",
+				Listen:   ":9999",
+				Forward:  backend.Addr().String(),
+			},
+		},
+		L4Rules: []config.Rule{
+			{
+				Match: config.RuleMatch{Listener: "echo"},
+				Allow: config.AllowSpec{AnyTailscale: true},
+			},
+		},
+		Default: "deny",
+	}
+	listenerCfg := cfg.ListenerByName("echo")
+
+	// 3. Mock WhoIs that maps 127.0.0.1 to a valid identity.
+	whois := &mockWhoIs{
+		responses: map[string]*apitype.WhoIsResponse{
+			"127.0.0.1": {
+				Node: &tailcfg.Node{
+					Name: "testnode.tail1234.ts.net.",
+				},
+				UserProfile: &tailcfg.UserProfile{
+					LoginName: "user@example.com",
+				},
+			},
+		},
+	}
+
+	// 4. Build dependencies.
+	engine := policy.NewEngine(cfg)
+	resolver := identity.NewResolver(whois)
+	l4proxy := NewL4Proxy(slog.Default())
+	lm := NewListenerManager(engine, resolver, l4proxy, slog.Default())
+
+	// 5. Create a regular net.Listen as the "tsnet" listener.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- lm.Serve(ctx, ln, listenerCfg)
+	}()
+
+	// 6. Connect to the listener, send data, verify echo.
+	conn, err := net.DialTimeout("tcp", ln.Addr().String(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial listener: %v", err)
+	}
+	defer conn.Close()
+
+	payload := []byte("hello listener manager")
+	if _, err := conn.Write(payload); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	buf := make([]byte, len(payload))
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+
+	if string(buf) != string(payload) {
+		t.Fatalf("echo mismatch: got %q, want %q", buf, payload)
+	}
+
+	// Cleanup.
+	conn.Close()
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err != nil && err != context.Canceled {
+			t.Fatalf("Serve returned unexpected error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Serve did not return in time")
+	}
+}
+
+func TestListenerManagerDeny(t *testing.T) {
+	// Backend that should never receive a connection.
+	backend := startEchoServer(t)
+
+	cfg := &config.Config{
+		Tailscale: config.TailscaleConfig{Hostname: "test"},
+		Listeners: []config.Listener{
+			{
+				Name:     "restricted",
+				Protocol: "tcp",
+				Listen:   ":9998",
+				Forward:  backend.Addr().String(),
+			},
+		},
+		L4Rules: []config.Rule{
+			{
+				Match: config.RuleMatch{Listener: "restricted"},
+				Allow: config.AllowSpec{Users: []string{"admin@corp.com"}},
+			},
+		},
+		Default: "deny",
+	}
+	listenerCfg := cfg.ListenerByName("restricted")
+
+	// WhoIs maps 127.0.0.1 to a non-admin user => should be denied.
+	whois := &mockWhoIs{
+		responses: map[string]*apitype.WhoIsResponse{
+			"127.0.0.1": {
+				Node: &tailcfg.Node{
+					Name: "rando.tail5678.ts.net.",
+				},
+				UserProfile: &tailcfg.UserProfile{
+					LoginName: "nobody@example.com",
+				},
+			},
+		},
+	}
+
+	engine := policy.NewEngine(cfg)
+	resolver := identity.NewResolver(whois)
+	l4proxy := NewL4Proxy(slog.Default())
+	lm := NewListenerManager(engine, resolver, l4proxy, slog.Default())
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go lm.Serve(ctx, ln, listenerCfg)
+
+	conn, err := net.DialTimeout("tcp", ln.Addr().String(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial listener: %v", err)
+	}
+	defer conn.Close()
+
+	// Write something; the manager should deny and close the connection.
+	conn.Write([]byte("should be denied"))
+
+	// Expect the connection to be closed by the server (read returns EOF or error).
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 64)
+	n, err := conn.Read(buf)
+	if n > 0 {
+		t.Fatalf("expected no data back on denied connection, got %q", buf[:n])
+	}
+	if err == nil {
+		t.Fatal("expected error (EOF/closed) on denied connection read")
+	}
+
+	cancel()
+}

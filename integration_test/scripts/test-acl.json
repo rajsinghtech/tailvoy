@@ -1,0 +1,21 @@
+{
+  "tagOwners": {
+    "tag:kind": []
+  },
+  "grants": [
+    {
+      "src": ["*"],
+      "dst": ["*"],
+      "ip": ["*"]
+    },
+    {
+      "src": ["tag:kind"],
+      "dst": ["tag:kind"],
+      "app": {
+        "rajsingh.info/cap/tailvoy": [
+          {"routes": ["/public/*", "/health", "/api/*", "/admin/*"]}
+        ]
+      }
+    }
+  ]
+}

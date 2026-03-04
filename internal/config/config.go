@@ -5,13 +5,32 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
-	Tailscale TailscaleConfig `yaml:"tailscale"`
-	Listeners []Listener      `yaml:"listeners"`
+	Tailscale TailscaleConfig  `yaml:"tailscale"`
+	Listeners []Listener       `yaml:"listeners"`
+	Discovery *DiscoveryConfig `yaml:"discovery"`
+}
+
+type DiscoveryConfig struct {
+	EnvoyAdmin     string `yaml:"envoyAdmin"`
+	EnvoyAddress   string `yaml:"envoyAddress"`
+	PollInterval   string `yaml:"pollInterval"`
+	ListenerFilter string `yaml:"listenerFilter"`
+	ProxyProtocol  string `yaml:"proxyProtocol"`
+}
+
+// ParsedPollInterval returns the poll interval as a time.Duration, defaulting to 10s.
+func (d *DiscoveryConfig) ParsedPollInterval() time.Duration {
+	if d.PollInterval == "" {
+		return 10 * time.Second
+	}
+	dur, _ := time.ParseDuration(d.PollInterval)
+	return dur
 }
 
 type TailscaleConfig struct {
@@ -69,6 +88,14 @@ func (c *Config) validate() error {
 		return fmt.Errorf("tailscale.hostname is required")
 	}
 
+	if c.Discovery != nil && len(c.Listeners) > 0 {
+		return fmt.Errorf("discovery and listeners are mutually exclusive")
+	}
+
+	if c.Discovery != nil {
+		return c.Discovery.validate()
+	}
+
 	listenerNames := make(map[string]struct{}, len(c.Listeners))
 	for i, l := range c.Listeners {
 		if l.Name == "" {
@@ -101,6 +128,32 @@ func (c *Config) validate() error {
 		listenerNames[l.Name] = struct{}{}
 	}
 
+	return nil
+}
+
+func (d *DiscoveryConfig) validate() error {
+	if d.EnvoyAdmin == "" {
+		return fmt.Errorf("discovery.envoyAdmin is required")
+	}
+	if d.EnvoyAddress == "" {
+		return fmt.Errorf("discovery.envoyAddress is required")
+	}
+	if d.PollInterval != "" {
+		if _, err := time.ParseDuration(d.PollInterval); err != nil {
+			return fmt.Errorf("discovery.pollInterval is invalid: %w", err)
+		}
+	}
+	switch d.ProxyProtocol {
+	case "", "v2":
+		// valid
+	default:
+		return fmt.Errorf("discovery.proxyProtocol must be empty or \"v2\", got %q", d.ProxyProtocol)
+	}
+	if d.ListenerFilter != "" {
+		if _, err := regexp.Compile(d.ListenerFilter); err != nil {
+			return fmt.Errorf("discovery.listenerFilter is invalid regex: %w", err)
+		}
+	}
 	return nil
 }
 

@@ -13,9 +13,9 @@
       "dst": ["tag:kind"],
       "app": {
         "rajsingh.info/cap/tailvoy": [
-          {"listeners": ["http"], "routes": ["/public/*", "/health", "/api/*", "/admin/*"]},
-          {"listeners": ["grpc"], "routes": ["/grpc.health.v1.Health/*"]},
-          {"listeners": ["tcp", "udp", "tls"]}
+          {"listeners": ["http", "default/eg/http"], "routes": ["/public/*", "/health", "/api/*", "/admin/*"]},
+          {"listeners": ["grpc", "default/eg/grpc"], "routes": ["/grpc.health.v1.Health/*"]},
+          {"listeners": ["tcp", "udp", "tls", "default/eg/tcp", "default/eg/udp", "default/eg/tls"]}
         ]
       }
     }

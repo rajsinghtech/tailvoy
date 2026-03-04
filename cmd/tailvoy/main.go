@@ -12,6 +12,7 @@ import (
 
 	"github.com/rajsinghtech/tailvoy/internal/authz"
 	"github.com/rajsinghtech/tailvoy/internal/config"
+	"github.com/rajsinghtech/tailvoy/internal/discovery"
 	"github.com/rajsinghtech/tailvoy/internal/envoy"
 	"github.com/rajsinghtech/tailvoy/internal/identity"
 	"github.com/rajsinghtech/tailvoy/internal/policy"
@@ -151,47 +152,69 @@ func run(args []string) error {
 		tsIP = ip4.String()
 	}
 
-	// Start tsnet listeners for each configured listener.
-	for i := range cfg.Listeners {
-		l := &cfg.Listeners[i]
-		switch l.Protocol {
-		case "udp":
-			if tsIP == "" {
-				cancel()
-				wg.Wait()
-				return fmt.Errorf("no tailscale IPv4 for UDP listener %s", l.Name)
-			}
-			pc, err := ts.ListenPacket("udp", fmt.Sprintf("%s:%s", tsIP, l.Port()))
-			if err != nil {
-				cancel()
-				wg.Wait()
-				return fmt.Errorf("listen udp %s (%s): %w", l.Name, l.Listen, err)
-			}
-			logger.Info("udp listener started", "name", l.Name, "addr", l.Listen)
+	if cfg.Discovery != nil {
+		// Discovery mode: poll Envoy admin API and reconcile listeners dynamically.
+		disc, err := discovery.New(cfg.Discovery, logger)
+		if err != nil {
+			cancel()
+			wg.Wait()
+			return fmt.Errorf("discovery setup: %w", err)
+		}
+		dynMgr := proxy.NewDynamicListenerManager(ts, listenerMgr, udpProxy, logger, tsIP)
 
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				if err := udpProxy.Serve(ctx, pc, l.Forward, resolver, engine, l.Name); err != nil {
-					logger.Error("udp listener error", "name", l.Name, "err", err)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer dynMgr.StopAll()
+			for listeners := range disc.Watch(ctx) {
+				if err := dynMgr.Reconcile(ctx, listeners); err != nil {
+					logger.Error("reconcile error", "err", err)
 				}
-			}()
-		default: // tcp
-			ln, err := ts.Listen("tcp", l.Listen)
-			if err != nil {
-				cancel()
-				wg.Wait()
-				return fmt.Errorf("listen %s (%s): %w", l.Name, l.Listen, err)
 			}
-			logger.Info("listener started", "name", l.Name, "addr", l.Listen)
-
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				if err := listenerMgr.Serve(ctx, ln, l); err != nil {
-					logger.Error("listener error", "name", l.Name, "err", err)
+		}()
+	} else {
+		// Static mode: start tsnet listeners for each configured listener.
+		for i := range cfg.Listeners {
+			l := &cfg.Listeners[i]
+			switch l.Protocol {
+			case "udp":
+				if tsIP == "" {
+					cancel()
+					wg.Wait()
+					return fmt.Errorf("no tailscale IPv4 for UDP listener %s", l.Name)
 				}
-			}()
+				pc, err := ts.ListenPacket("udp", fmt.Sprintf("%s:%s", tsIP, l.Port()))
+				if err != nil {
+					cancel()
+					wg.Wait()
+					return fmt.Errorf("listen udp %s (%s): %w", l.Name, l.Listen, err)
+				}
+				logger.Info("udp listener started", "name", l.Name, "addr", l.Listen)
+
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					if err := udpProxy.Serve(ctx, pc, l.Forward, resolver, engine, l.Name); err != nil {
+						logger.Error("udp listener error", "name", l.Name, "err", err)
+					}
+				}()
+			default: // tcp
+				ln, err := ts.Listen("tcp", l.Listen)
+				if err != nil {
+					cancel()
+					wg.Wait()
+					return fmt.Errorf("listen %s (%s): %w", l.Name, l.Listen, err)
+				}
+				logger.Info("listener started", "name", l.Name, "addr", l.Listen)
+
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					if err := listenerMgr.Serve(ctx, ln, l); err != nil {
+						logger.Error("listener error", "name", l.Name, "err", err)
+					}
+				}()
+			}
 		}
 	}
 

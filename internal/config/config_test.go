@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func testdataPath(name string) string {
@@ -377,6 +378,152 @@ listeners:
 	}
 	if cfg.Tailscale.AuthKey != "${}" {
 		t.Errorf("authkey = %q, want %q (literal, not expanded)", cfg.Tailscale.AuthKey, "${}")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Discovery config validation
+// ---------------------------------------------------------------------------
+
+func TestDiscoveryConfig_Valid(t *testing.T) {
+	data := []byte(`
+tailscale:
+  hostname: "test"
+discovery:
+  envoyAdmin: "http://127.0.0.1:9901"
+  envoyAddress: "127.0.0.1"
+  pollInterval: "5s"
+  proxyProtocol: "v2"
+  listenerFilter: ".*http.*"
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Discovery == nil {
+		t.Fatal("expected non-nil Discovery")
+	}
+	if cfg.Discovery.EnvoyAdmin != "http://127.0.0.1:9901" {
+		t.Errorf("envoyAdmin = %q", cfg.Discovery.EnvoyAdmin)
+	}
+}
+
+func TestDiscoveryConfig_MissingEnvoyAdmin(t *testing.T) {
+	data := []byte(`
+tailscale:
+  hostname: "test"
+discovery:
+  envoyAddress: "127.0.0.1"
+`)
+	_, err := Parse(data)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "envoyAdmin is required") {
+		t.Errorf("error = %q", err)
+	}
+}
+
+func TestDiscoveryConfig_MissingEnvoyAddress(t *testing.T) {
+	data := []byte(`
+tailscale:
+  hostname: "test"
+discovery:
+  envoyAdmin: "http://127.0.0.1:9901"
+`)
+	_, err := Parse(data)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "envoyAddress is required") {
+		t.Errorf("error = %q", err)
+	}
+}
+
+func TestDiscoveryConfig_MutualExclusion(t *testing.T) {
+	data := []byte(`
+tailscale:
+  hostname: "test"
+discovery:
+  envoyAdmin: "http://127.0.0.1:9901"
+  envoyAddress: "127.0.0.1"
+listeners:
+  - name: web
+    protocol: tcp
+    listen: ":80"
+    forward: "localhost:80"
+`)
+	_, err := Parse(data)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Errorf("error = %q", err)
+	}
+}
+
+func TestDiscoveryConfig_InvalidPollInterval(t *testing.T) {
+	data := []byte(`
+tailscale:
+  hostname: "test"
+discovery:
+  envoyAdmin: "http://127.0.0.1:9901"
+  envoyAddress: "127.0.0.1"
+  pollInterval: "not-a-duration"
+`)
+	_, err := Parse(data)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "pollInterval") {
+		t.Errorf("error = %q", err)
+	}
+}
+
+func TestDiscoveryConfig_InvalidProxyProtocol(t *testing.T) {
+	data := []byte(`
+tailscale:
+  hostname: "test"
+discovery:
+  envoyAdmin: "http://127.0.0.1:9901"
+  envoyAddress: "127.0.0.1"
+  proxyProtocol: "v1"
+`)
+	_, err := Parse(data)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "proxyProtocol") {
+		t.Errorf("error = %q", err)
+	}
+}
+
+func TestDiscoveryConfig_InvalidListenerFilter(t *testing.T) {
+	data := []byte(`
+tailscale:
+  hostname: "test"
+discovery:
+  envoyAdmin: "http://127.0.0.1:9901"
+  envoyAddress: "127.0.0.1"
+  listenerFilter: "[invalid"
+`)
+	_, err := Parse(data)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "listenerFilter") {
+		t.Errorf("error = %q", err)
+	}
+}
+
+func TestDiscoveryConfig_DefaultPollInterval(t *testing.T) {
+	d := &DiscoveryConfig{
+		EnvoyAdmin:   "http://127.0.0.1:9901",
+		EnvoyAddress: "127.0.0.1",
+	}
+	dur := d.ParsedPollInterval()
+	if dur != 10*time.Second {
+		t.Errorf("default poll interval = %v, want 10s", dur)
 	}
 }
 

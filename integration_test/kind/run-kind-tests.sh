@@ -233,11 +233,20 @@ if [ -z "$IP" ] || [ "$IP" = "null" ]; then
 fi
 sleep 5
 
-# Smoke test
+# Smoke test — retry to allow time for discovery mode to find Envoy listeners
 echo "=== Smoke test ==="
-SMOKE=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 15 "http://$IP:80/health" 2>&1 || true)
-if [ "$SMOKE" != "200" ]; then
-    echo "FATAL: Smoke test failed (GET /health returned $SMOKE)"
+SMOKE_OK=false
+for i in $(seq 1 30); do
+    SMOKE=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 10 "http://$IP:8080/health" 2>&1 || true)
+    if [ "$SMOKE" = "200" ]; then
+        SMOKE_OK=true
+        break
+    fi
+    echo "  smoke attempt $i: got $SMOKE, retrying..."
+    sleep 2
+done
+if [ "$SMOKE_OK" != "true" ]; then
+    echo "FATAL: Smoke test failed after 30 attempts (GET /health returned $SMOKE)"
     dump_logs
     exit 1
 fi
@@ -255,36 +264,36 @@ echo "========================================"
 # SecurityPolicy contextExtensions: listener=http
 
 # Allow: prefix match /public/*
-assert_http "HTTP: GET /public/hello allow" "http://$IP:80/public/hello" "200"
-assert_http "HTTP: GET /public/nested/path allow" "http://$IP:80/public/nested/path" "200"
+assert_http "HTTP: GET /public/hello allow" "http://$IP:8080/public/hello" "200"
+assert_http "HTTP: GET /public/nested/path allow" "http://$IP:8080/public/nested/path" "200"
 
 # Allow: exact match /health
-assert_http "HTTP: GET /health allow" "http://$IP:80/health" "200"
+assert_http "HTTP: GET /health allow" "http://$IP:8080/health" "200"
 
 # Allow: prefix match /api/*
-assert_http "HTTP: GET /api/data allow" "http://$IP:80/api/data" "200"
-assert_http "HTTP: GET /api/v1/users allow" "http://$IP:80/api/v1/users" "200"
+assert_http "HTTP: GET /api/data allow" "http://$IP:8080/api/data" "200"
+assert_http "HTTP: GET /api/v1/users allow" "http://$IP:8080/api/v1/users" "200"
 
 # Allow: prefix match /admin/*
-assert_http "HTTP: GET /admin/settings allow" "http://$IP:80/admin/settings" "200"
+assert_http "HTTP: GET /admin/settings allow" "http://$IP:8080/admin/settings" "200"
 
 # Deny: root path not in cap routes
-assert_http "HTTP: GET / deny" "http://$IP:80/" "403"
+assert_http "HTTP: GET / deny" "http://$IP:8080/" "403"
 
 # Deny: paths not matching any cap route
-assert_http "HTTP: GET /secret/data deny" "http://$IP:80/secret/data" "403"
-assert_http "HTTP: GET /internal/config deny" "http://$IP:80/internal/config" "403"
-assert_http "HTTP: GET /login deny" "http://$IP:80/login" "403"
-assert_http "HTTP: GET /dashboard deny" "http://$IP:80/dashboard" "403"
+assert_http "HTTP: GET /secret/data deny" "http://$IP:8080/secret/data" "403"
+assert_http "HTTP: GET /internal/config deny" "http://$IP:8080/internal/config" "403"
+assert_http "HTTP: GET /login deny" "http://$IP:8080/login" "403"
+assert_http "HTTP: GET /dashboard deny" "http://$IP:8080/dashboard" "403"
 
 # Deny: exact match boundary — /health with trailing slash is not /health
-assert_http "HTTP: GET /health/ deny (exact match)" "http://$IP:80/health/" "403"
+assert_http "HTTP: GET /health/ deny (exact match)" "http://$IP:8080/health/" "403"
 
 # Deny: similar prefix but no match — /apiary is not /api/*
-assert_http "HTTP: GET /apiary deny (not /api/*)" "http://$IP:80/apiary" "403"
+assert_http "HTTP: GET /apiary deny (not /api/*)" "http://$IP:8080/apiary" "403"
 
 # Identity headers
-BODY=$(curl -sf --max-time 10 "http://$IP:80/public/headers" 2>&1 || true)
+BODY=$(curl -sf --max-time 10 "http://$IP:8080/public/headers" 2>&1 || true)
 USER_HDR=$(echo "$BODY" | jq -r '.headers["X-Tailscale-User"]' 2>/dev/null || true)
 NODE_HDR=$(echo "$BODY" | jq -r '.headers["X-Tailscale-Node"]' 2>/dev/null || true)
 IP_HDR=$(echo "$BODY" | jq -r '.headers["X-Tailscale-Ip"]' 2>/dev/null || true)
@@ -311,14 +320,14 @@ echo "========================================"
 
 # Cap rule: {"listeners": ["tcp", "udp", "tls"]} — no routes = L4 access only.
 # HasAccess(listener="tcp", sni="", id) matches because "tcp" is in listeners.
-TCP_RESP=$(echo "hello" | $NC_CMD -w 5 "$IP" 5432 2>/dev/null || true)
+TCP_RESP=$(echo "hello" | $NC_CMD -w 5 "$IP" 8090 2>/dev/null || true)
 if echo "$TCP_RESP" | grep -q "echo: hello"; then
     test_pass "TCP: echo allow (cap grants L4 access)"
 else
     test_fail "TCP: echo allow (cap grants L4 access)" "got '$TCP_RESP'"
 fi
 
-TCP_RESP2=$(echo "world" | $NC_CMD -w 5 "$IP" 5432 2>/dev/null || true)
+TCP_RESP2=$(echo "world" | $NC_CMD -w 5 "$IP" 8090 2>/dev/null || true)
 if echo "$TCP_RESP2" | grep -q "echo: world"; then
     test_pass "TCP: second connection allow"
 else
@@ -335,15 +344,15 @@ echo "========================================"
 
 # Cap rule: {"listeners": ["tcp", "udp", "tls"]} — "udp" in listeners = L4 access.
 # Keep stdin open with sleep so ncat waits for the response before exiting.
-UDP_RESP=$({ echo -n "hello"; sleep 3; } | $NC_CMD -u -w 5 "$IP" 9053 2>/dev/null || true)
+UDP_RESP=$({ echo -n "hello"; sleep 3; } | $NC_CMD -u -w 5 "$IP" 8053 2>/dev/null || true)
 if echo "$UDP_RESP" | grep -q "echo: hello"; then
     test_pass "UDP: echo allow (cap grants L4 access)"
 else
     # Try alternate approach with socat if available
     if command -v socat &>/dev/null; then
-        UDP_RESP2=$(echo -n "hello" | socat -T5 - UDP:"$IP":9053 2>/dev/null || true)
+        UDP_RESP2=$(echo -n "hello" | socat -T5 - UDP:"$IP":8053 2>/dev/null || true)
     else
-        UDP_RESP2=$(bash -c "exec 3<>/dev/udp/$IP/9053; echo -n 'hello' >&3; read -t 5 resp <&3; echo \"\$resp\"" 2>/dev/null || true)
+        UDP_RESP2=$(bash -c "exec 3<>/dev/udp/$IP/8053; echo -n 'hello' >&3; read -t 5 resp <&3; echo \"\$resp\"" 2>/dev/null || true)
     fi
     if echo "$UDP_RESP2" | grep -q "echo: hello"; then
         test_pass "UDP: echo allow (cap grants L4 access)"
@@ -362,9 +371,9 @@ echo "========================================"
 
 # Cap rule: {"listeners": ["tcp", "udp", "tls"]} — "tls" in listeners = L4 passthrough access.
 TLS_HTTP=$(curl -sf -o /dev/null -w "%{http_code}" --insecure \
-    --resolve "secure.tailvoy.test:443:$IP" \
+    --resolve "secure.tailvoy.test:8443:$IP" \
     --max-time 10 \
-    "https://secure.tailvoy.test:443/" 2>&1 || true)
+    "https://secure.tailvoy.test:8443/" 2>&1 || true)
 if [ "$TLS_HTTP" = "200" ]; then
     test_pass "TLS: passthrough allow (cap grants L4 access)"
 else
@@ -372,7 +381,7 @@ else
 fi
 
 # Verify backend cert (not Envoy-terminated) — check CN
-TLS_SUBJECT=$(echo | openssl s_client -connect "$IP:443" -servername secure.tailvoy.test 2>/dev/null \
+TLS_SUBJECT=$(echo | openssl s_client -connect "$IP:8443" -servername secure.tailvoy.test 2>/dev/null \
     | openssl x509 -noout -subject 2>/dev/null || true)
 if echo "$TLS_SUBJECT" | grep -qi "secure.tailvoy.test"; then
     test_pass "TLS: backend cert CN matches"
@@ -381,9 +390,9 @@ else
 fi
 
 TLS_BODY=$(curl -sf --insecure \
-    --resolve "secure.tailvoy.test:443:$IP" \
+    --resolve "secure.tailvoy.test:8443:$IP" \
     --max-time 10 \
-    "https://secure.tailvoy.test:443/" 2>&1 || true)
+    "https://secure.tailvoy.test:8443/" 2>&1 || true)
 TLS_FLAG=$(echo "$TLS_BODY" | jq -r '.tls' 2>/dev/null || true)
 if [ "$TLS_FLAG" = "true" ]; then
     test_pass "TLS: backend reports tls=true"
@@ -405,7 +414,7 @@ echo "========================================"
 # grpc-health-probe doesn't use reflection, so it works with restricted cap routes.
 if [ "$HAS_HEALTHPROBE" = "true" ]; then
     # Allow: /grpc.health.v1.Health/Check matches prefix /grpc.health.v1.Health/*
-    GRPC_OUT=$(grpc-health-probe -addr "$IP:50051" -connect-timeout 10s -rpc-timeout 10s 2>&1; echo "EXIT:$?")
+    GRPC_OUT=$(grpc-health-probe -addr "$IP:8081" -connect-timeout 10s -rpc-timeout 10s 2>&1; echo "EXIT:$?")
     GRPC_EXIT=$(echo "$GRPC_OUT" | grep -o 'EXIT:[0-9]*' | cut -d: -f2)
     if [ "$GRPC_EXIT" = "0" ]; then
         test_pass "gRPC: health check allow"
@@ -414,7 +423,7 @@ if [ "$HAS_HEALTHPROBE" = "true" ]; then
     fi
 
     # Allow: named service health check (same path prefix /grpc.health.v1.Health/*)
-    GRPC_OUT2=$(grpc-health-probe -addr "$IP:50051" -service echo -connect-timeout 10s -rpc-timeout 10s 2>&1; echo "EXIT:$?")
+    GRPC_OUT2=$(grpc-health-probe -addr "$IP:8081" -service echo -connect-timeout 10s -rpc-timeout 10s 2>&1; echo "EXIT:$?")
     GRPC_EXIT2=$(echo "$GRPC_OUT2" | grep -o 'EXIT:[0-9]*' | cut -d: -f2)
     if [ "$GRPC_EXIT2" = "0" ]; then
         test_pass "gRPC: named service health allow"
@@ -428,7 +437,7 @@ fi
 # grpcurl uses reflection which is denied by cap routes — perfect for deny test.
 if [ "$HAS_GRPCURL" = "true" ]; then
     # Deny: reflection uses /grpc.reflection.v1alpha.ServerReflection/* — not in cap routes
-    GRPC_DENY=$(grpcurl -plaintext -max-time 10 "$IP:50051" list 2>&1 || true)
+    GRPC_DENY=$(grpcurl -plaintext -max-time 10 "$IP:8081" list 2>&1 || true)
     if echo "$GRPC_DENY" | grep -qi "PermissionDenied\|code = 7\|PERMISSION_DENIED"; then
         test_pass "gRPC: reflection deny (not in cap routes)"
     else

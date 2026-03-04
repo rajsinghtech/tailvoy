@@ -16,7 +16,7 @@ spec:
     contextExtensions:
       - name: listener
         type: Value
-        value: "http"
+        value: "default/eg/http"
 ---
 apiVersion: gateway.envoyproxy.io/v1alpha1
 kind: SecurityPolicy
@@ -36,4 +36,4 @@ spec:
     contextExtensions:
       - name: listener
         type: Value
-        value: "grpc"
+        value: "default/eg/grpc"

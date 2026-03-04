@@ -46,10 +46,16 @@ jobs:
       - name: Create ephemeral tailnet
         id: create
         run: |
-          TAILNET_NAME="tailvoy-ci-${{ github.run_id }}"
-          ./integration_test/scripts/create-tailnet.sh \
+          DISPLAY_NAME="tailvoy-ci-${{ github.run_id }}"
+          CREATE_OUTPUT=$(./integration_test/scripts/create-tailnet.sh \
             "${{ steps.token.outputs.access_token }}" \
-            "$TAILNET_NAME"
+            "$DISPLAY_NAME")
+          TAILNET_NAME=$(echo "$CREATE_OUTPUT" | jq -r '.dnsName')
+          if [ -z "$TAILNET_NAME" ] || [ "$TAILNET_NAME" = "null" ]; then
+            echo "Error: could not extract dnsName from create response" >&2
+            echo "$CREATE_OUTPUT" >&2
+            exit 1
+          fi
           echo "tailnet_name=$TAILNET_NAME" >> "$GITHUB_OUTPUT"
 
       - name: Apply test ACL

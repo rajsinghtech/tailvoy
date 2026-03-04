@@ -29,7 +29,7 @@ jobs:
         id: oidc
         run: |
           JWT=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api.tailscale.com/${{ secrets.TS_OAUTH_CLIENT_ID }}" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api.tailscale.com/TbqNGJkY5611CNTRL-kz4CwX2LK721CNTRL" \
             | jq -r '.value')
           echo "::add-mask::$JWT"
           echo "jwt=$JWT" >> "$GITHUB_OUTPUT"
@@ -38,7 +38,7 @@ jobs:
         id: token
         run: |
           ACCESS_TOKEN=$(./integration_test/scripts/exchange-oidc-token.sh \
-            "${{ secrets.TS_OAUTH_CLIENT_ID }}" \
+            "TbqNGJkY5611CNTRL-kz4CwX2LK721CNTRL" \
             "${{ steps.oidc.outputs.jwt }}")
           echo "::add-mask::$ACCESS_TOKEN"
           echo "access_token=$ACCESS_TOKEN" >> "$GITHUB_OUTPUT"
@@ -103,8 +103,8 @@ jobs:
       - name: Install Tailscale
         uses: tailscale/github-action@v4
         with:
-          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
-          audience: api.tailscale.com/${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-client-id: TbqNGJkY5611CNTRL-kz4CwX2LK721CNTRL
+          audience: api.tailscale.com/TbqNGJkY5611CNTRL-kz4CwX2LK721CNTRL
           tags: tag:kind
 
       - name: Run kind integration tests
@@ -141,7 +141,7 @@ jobs:
         id: oidc
         run: |
           JWT=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api.tailscale.com/${{ secrets.TS_OAUTH_CLIENT_ID }}" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api.tailscale.com/TbqNGJkY5611CNTRL-kz4CwX2LK721CNTRL" \
             | jq -r '.value')
           echo "::add-mask::$JWT"
           echo "jwt=$JWT" >> "$GITHUB_OUTPUT"
@@ -150,7 +150,7 @@ jobs:
         id: token
         run: |
           ACCESS_TOKEN=$(./integration_test/scripts/exchange-oidc-token.sh \
-            "${{ secrets.TS_OAUTH_CLIENT_ID }}" \
+            "TbqNGJkY5611CNTRL-kz4CwX2LK721CNTRL" \
             "${{ steps.oidc.outputs.jwt }}")
           echo "::add-mask::$ACCESS_TOKEN"
           echo "access_token=$ACCESS_TOKEN" >> "$GITHUB_OUTPUT"

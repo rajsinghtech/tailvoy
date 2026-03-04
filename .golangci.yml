@@ -1,0 +1,36 @@
+version: "2"
+run:
+  allow-parallel-runners: true
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unconvert
+    - unused
+  settings:
+    errcheck:
+      exclude-functions:
+        - (io.Closer).Close
+        - (net.Conn).Close
+        - (net.Conn).SetReadDeadline
+        - (net.Conn).SetWriteDeadline
+        - (*net.TCPConn).CloseWrite
+        - (*os.File).Close
+        - io.Copy
+  exclusions:
+    generated: lax
+    paths:
+      - integration_test/backend$
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  exclusions:
+    generated: lax

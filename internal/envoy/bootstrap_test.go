@@ -756,7 +756,8 @@ static_resources:
 		filters := fc["filters"].([]interface{})
 		f := filters[0].(map[string]interface{})
 
-		if name == "http_listener" {
+		switch name {
+		case "http_listener":
 			// HTTP listener should get ext_authz injected
 			tc := f["typed_config"].(map[string]interface{})
 			httpFilters := tc["http_filters"].([]interface{})
@@ -764,7 +765,7 @@ static_resources:
 			if first["name"] != "envoy.filters.http.ext_authz" {
 				t.Errorf("HTTP listener: first filter = %v, want ext_authz", first["name"])
 			}
-		} else if name == "tcp_listener" {
+		case "tcp_listener":
 			// TCP listener should NOT get ext_authz
 			if f["name"] != "envoy.filters.network.tcp_proxy" {
 				t.Errorf("TCP listener: filter = %v, want tcp_proxy", f["name"])

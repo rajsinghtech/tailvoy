@@ -200,10 +200,10 @@ func TestUnknownIP(t *testing.T) {
 
 func TestExtractSourceIP(t *testing.T) {
 	tests := []struct {
-		name string
-		xff  string
+		name  string
+		xff   string
 		envoy string
-		want string
+		want  string
 	}{
 		{
 			name: "single xff",
@@ -216,7 +216,7 @@ func TestExtractSourceIP(t *testing.T) {
 			want: "100.64.1.1",
 		},
 		{
-			name: "empty xff falls back to envoy header",
+			name:  "empty xff falls back to envoy header",
 			envoy: "100.64.2.2",
 			want:  "100.64.2.2",
 		},

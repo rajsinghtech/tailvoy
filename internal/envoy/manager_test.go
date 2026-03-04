@@ -7,10 +7,10 @@ import (
 
 func TestParseArgs(t *testing.T) {
 	tests := []struct {
-		name       string
-		input      []string
-		wantTV     []string
-		wantEnvoy  []string
+		name      string
+		input     []string
+		wantTV    []string
+		wantEnvoy []string
 	}{
 		{
 			name:      "no separator",

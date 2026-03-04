@@ -30,7 +30,7 @@ func main() {
 			}
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	})
 	fmt.Printf("backend listening on :%s\n", port)
 	if err := http.ListenAndServe(":"+port, nil); err != nil {

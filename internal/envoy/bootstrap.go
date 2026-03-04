@@ -218,9 +218,9 @@ func buildHTTPListener(l config.Listener, backendCluster string) map[string]inte
 					map[string]interface{}{
 						"name": "envoy.filters.network.http_connection_manager",
 						"typed_config": map[string]interface{}{
-							"@type":       "type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager",
-							"stat_prefix": l.Name,
-							"codec_type":  "AUTO",
+							"@type":              "type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager",
+							"stat_prefix":        l.Name,
+							"codec_type":         "AUTO",
 							"use_remote_address": true,
 							"route_config": map[string]interface{}{
 								"virtual_hosts": []interface{}{
@@ -287,7 +287,7 @@ func buildExtAuthzFilter(listenerName string) map[string]interface{} {
 	return map[string]interface{}{
 		"name": "envoy.filters.http.ext_authz",
 		"typed_config": map[string]interface{}{
-			"@type":            "type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz",
+			"@type":              "type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz",
 			"failure_mode_allow": false,
 			"http_service": map[string]interface{}{
 				"server_uri": map[string]interface{}{

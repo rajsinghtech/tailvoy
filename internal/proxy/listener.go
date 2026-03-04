@@ -47,7 +47,7 @@ func (lm *ListenerManager) Serve(ctx context.Context, ln Acceptor, listenerCfg *
 	// Close the listener when context is cancelled to unblock Accept.
 	go func() {
 		<-ctx.Done()
-		ln.Close()
+		_ = ln.Close()
 	}()
 
 	for {

@@ -70,7 +70,7 @@ func run(args []string) error {
 		AuthKey:   cfg.Tailscale.AuthKey,
 		Ephemeral: cfg.Tailscale.Ephemeral,
 	}
-	defer ts.Close()
+	defer func() { _ = ts.Close() }()
 
 	logger.Info("connecting to tailnet", "hostname", cfg.Tailscale.Hostname)
 	if _, err := ts.Up(ctx); err != nil {
@@ -148,7 +148,7 @@ func run(args []string) error {
 			wg.Wait()
 			return fmt.Errorf("create temp config: %w", err)
 		}
-		defer os.Remove(tmpFile.Name())
+		defer func() { _ = os.Remove(tmpFile.Name()) }()
 
 		if _, err := tmpFile.WriteString(result.BootstrapYAML); err != nil {
 			tmpFile.Close()

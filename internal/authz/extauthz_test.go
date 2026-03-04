@@ -89,6 +89,33 @@ func checkReq(headers map[string]string, path string) *authv3.CheckRequest {
 	}
 }
 
+// checkReqWithContext builds a CheckRequest with headers, path, and context extensions.
+func checkReqWithContext(headers map[string]string, path string, contextExt map[string]string) *authv3.CheckRequest {
+	host := headers[":authority"]
+	return &authv3.CheckRequest{
+		Attributes: &authv3.AttributeContext{
+			Request: &authv3.AttributeContext_Request{
+				Http: &authv3.AttributeContext_HttpRequest{
+					Headers: headers,
+					Path:    path,
+					Host:    host,
+				},
+			},
+			ContextExtensions: contextExt,
+		},
+	}
+}
+
+// multiCapMap builds a PeerCapMap from full TailvoyCapRule structs.
+func multiCapMap(rules ...identity.TailvoyCapRule) tailcfg.PeerCapMap {
+	msgs := make([]tailcfg.RawMessage, len(rules))
+	for i, r := range rules {
+		b, _ := json.Marshal(r)
+		msgs[i] = tailcfg.RawMessage(b)
+	}
+	return tailcfg.PeerCapMap{identity.CapTailvoy: msgs}
+}
+
 func isOK(resp *authv3.CheckResponse) bool {
 	return resp.GetStatus().GetCode() == int32(codes.OK)
 }
@@ -461,5 +488,167 @@ func TestDenyReturnsPermissionDenied(t *testing.T) {
 	}
 	if resp.GetStatus().GetCode() != int32(codes.PermissionDenied) {
 		t.Errorf("deny status code = %d, want %d (PermissionDenied)", resp.GetStatus().GetCode(), codes.PermissionDenied)
+	}
+}
+
+func TestCheckWithListenerContextExtension(t *testing.T) {
+	resp := &apitype.WhoIsResponse{
+		Node:        &tailcfg.Node{Name: "n.ts.net."},
+		UserProfile: &tailcfg.UserProfile{LoginName: "alice@example.com"},
+		CapMap: multiCapMap(identity.TailvoyCapRule{
+			Listeners: []string{"http"},
+			Routes:    []string{"/*"},
+		}),
+	}
+	srv := testServer(t, map[string]*apitype.WhoIsResponse{"100.64.1.1": resp})
+	client := startGRPC(t, srv)
+
+	// Matching listener -> allow.
+	r, err := client.Check(context.Background(), checkReqWithContext(
+		map[string]string{"x-forwarded-for": "100.64.1.1"},
+		"/foo",
+		map[string]string{"listener": "http"},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !isOK(r) {
+		t.Fatal("expected allow for matching listener")
+	}
+
+	// Non-matching listener -> deny.
+	r, err = client.Check(context.Background(), checkReqWithContext(
+		map[string]string{"x-forwarded-for": "100.64.1.1"},
+		"/foo",
+		map[string]string{"listener": "grpc"},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if isOK(r) {
+		t.Fatal("expected deny for non-matching listener")
+	}
+}
+
+func TestCheckWithHostHeader(t *testing.T) {
+	resp := &apitype.WhoIsResponse{
+		Node:        &tailcfg.Node{Name: "n.ts.net."},
+		UserProfile: &tailcfg.UserProfile{LoginName: "alice@example.com"},
+		CapMap: multiCapMap(identity.TailvoyCapRule{
+			Hostnames: []string{"api.example.com"},
+			Routes:    []string{"/*"},
+		}),
+	}
+	srv := testServer(t, map[string]*apitype.WhoIsResponse{"100.64.1.1": resp})
+	client := startGRPC(t, srv)
+
+	// Matching host -> allow.
+	r, err := client.Check(context.Background(), checkReqWithContext(
+		map[string]string{
+			"x-forwarded-for": "100.64.1.1",
+			":authority":      "api.example.com",
+		},
+		"/anything",
+		nil,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !isOK(r) {
+		t.Fatal("expected allow for matching host")
+	}
+
+	// Non-matching host -> deny.
+	r, err = client.Check(context.Background(), checkReqWithContext(
+		map[string]string{
+			"x-forwarded-for": "100.64.1.1",
+			":authority":      "other.example.com",
+		},
+		"/anything",
+		nil,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if isOK(r) {
+		t.Fatal("expected deny for non-matching host")
+	}
+}
+
+func TestCheckWithAllDimensions(t *testing.T) {
+	resp := &apitype.WhoIsResponse{
+		Node:        &tailcfg.Node{Name: "n.ts.net."},
+		UserProfile: &tailcfg.UserProfile{LoginName: "alice@example.com"},
+		CapMap: multiCapMap(identity.TailvoyCapRule{
+			Listeners: []string{"http"},
+			Hostnames: []string{"api.example.com"},
+			Routes:    []string{"/api/*"},
+		}),
+	}
+	srv := testServer(t, map[string]*apitype.WhoIsResponse{"100.64.1.1": resp})
+	client := startGRPC(t, srv)
+
+	// All dimensions match -> allow.
+	r, err := client.Check(context.Background(), checkReqWithContext(
+		map[string]string{
+			"x-forwarded-for": "100.64.1.1",
+			":authority":      "api.example.com",
+		},
+		"/api/data",
+		map[string]string{"listener": "http"},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !isOK(r) {
+		t.Fatal("expected allow when all dimensions match")
+	}
+
+	// Wrong listener -> deny (AND semantics).
+	r, err = client.Check(context.Background(), checkReqWithContext(
+		map[string]string{
+			"x-forwarded-for": "100.64.1.1",
+			":authority":      "api.example.com",
+		},
+		"/api/data",
+		map[string]string{"listener": "grpc"},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if isOK(r) {
+		t.Fatal("expected deny when listener doesn't match")
+	}
+
+	// Wrong host -> deny.
+	r, err = client.Check(context.Background(), checkReqWithContext(
+		map[string]string{
+			"x-forwarded-for": "100.64.1.1",
+			":authority":      "other.example.com",
+		},
+		"/api/data",
+		map[string]string{"listener": "http"},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if isOK(r) {
+		t.Fatal("expected deny when host doesn't match")
+	}
+
+	// Wrong path -> deny.
+	r, err = client.Check(context.Background(), checkReqWithContext(
+		map[string]string{
+			"x-forwarded-for": "100.64.1.1",
+			":authority":      "api.example.com",
+		},
+		"/admin/settings",
+		map[string]string{"listener": "http"},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if isOK(r) {
+		t.Fatal("expected deny when path doesn't match")
 	}
 }

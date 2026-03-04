@@ -49,13 +49,29 @@ func (s *Server) Check(ctx context.Context, req *authv3.CheckRequest) (*authv3.C
 	}
 
 	path := httpReq.GetPath()
+	host := httpReq.GetHost()
+	if host == "" {
+		host = headers[":authority"]
+	}
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
 
-	if !s.engine.CheckAccess(path, id) {
-		s.logger.Info("ext_authz: denied", "ip", srcIP, "path", path, "user", id.UserLogin, "node", id.NodeName)
+	listener := req.GetAttributes().GetContextExtensions()["listener"]
+	if listener == "" {
+		listener = "default"
+	}
+
+	if !s.engine.CheckAccess(listener, host, path, id) {
+		s.logger.Info("ext_authz: denied",
+			"ip", srcIP, "path", path, "host", host, "listener", listener,
+			"user", id.UserLogin, "node", id.NodeName)
 		return denyResponse(), nil
 	}
 
-	s.logger.Debug("ext_authz: allowed", "ip", srcIP, "path", path, "user", id.UserLogin, "node", id.NodeName)
+	s.logger.Debug("ext_authz: allowed",
+		"ip", srcIP, "path", path, "host", host, "listener", listener,
+		"user", id.UserLogin, "node", id.NodeName)
 	return allowResponse(id), nil
 }
 

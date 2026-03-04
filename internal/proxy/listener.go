@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"net"
 	"sync"
@@ -85,10 +86,21 @@ func (lm *ListenerManager) handleConn(ctx context.Context, conn net.Conn, listen
 		return
 	}
 
-	if !lm.engine.HasAccess(listenerCfg.Name, "", id) {
+	// For non-L7 TCP listeners, peek TLS ClientHello for SNI.
+	var sni string
+	if !listenerCfg.L7Policy && listenerCfg.Protocol == "tcp" {
+		var reader io.Reader
+		sni, reader, _ = PeekSNI(conn)
+		if reader != nil {
+			conn = &readerConn{Conn: conn, reader: reader}
+		}
+	}
+
+	if !lm.engine.HasAccess(listenerCfg.Name, sni, id) {
 		lm.logger.Info("connection denied by L4 policy",
 			"listener", listenerCfg.Name,
 			"remote", remoteAddr,
+			"sni", sni,
 			"identity", id.UserLogin,
 			"node", id.NodeName,
 		)

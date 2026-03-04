@@ -95,9 +95,14 @@ func (p *UDPProxy) Serve(ctx context.Context, pc net.PacketConn, backendAddr str
 		src := srcAddr.String()
 		p.logger.Debug("udp packet received", "listener", listenerName, "from", src, "bytes", n)
 
-		// Identity check on first packet from this source.
+		// Lookup or create session for this source address.
 		mu.Lock()
 		sess, exists := sessions[src]
+		if !exists {
+			// Hold lock while inserting placeholder to prevent duplicate sessions.
+			sess = &udpSession{lastSeen: time.Now()}
+			sessions[src] = sess
+		}
 		mu.Unlock()
 
 		if !exists {
@@ -105,12 +110,18 @@ func (p *UDPProxy) Serve(ctx context.Context, pc net.PacketConn, backendAddr str
 			if err != nil {
 				p.logger.Warn("udp identity resolution failed",
 					"listener", listenerName, "remote", src, "err", err)
+				mu.Lock()
+				delete(sessions, src)
+				mu.Unlock()
 				continue
 			}
 			if !engine.HasAccess(listenerName, "", id) {
 				p.logger.Info("udp packet denied by L4 policy",
 					"listener", listenerName, "remote", src,
 					"identity", id.UserLogin, "node", id.NodeName)
+				mu.Lock()
+				delete(sessions, src)
+				mu.Unlock()
 				continue
 			}
 
@@ -121,13 +132,13 @@ func (p *UDPProxy) Serve(ctx context.Context, pc net.PacketConn, backendAddr str
 			if err != nil {
 				p.logger.Error("udp dial backend failed",
 					"listener", listenerName, "backend", backendAddr, "err", err)
+				mu.Lock()
+				delete(sessions, src)
+				mu.Unlock()
 				continue
 			}
 
-			sess = &udpSession{backend: bc, lastSeen: time.Now()}
-			mu.Lock()
-			sessions[src] = sess
-			mu.Unlock()
+			sess.backend = bc
 
 			// Reverse path: backend → source.
 			go func(s *udpSession, origin net.Addr) {

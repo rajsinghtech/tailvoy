@@ -85,6 +85,7 @@ func run(args []string) error {
 	// Build components.
 	engine := policy.NewEngine()
 	resolver := identity.NewResolver(lc)
+	defer resolver.Close()
 	l4proxy := proxy.NewL4Proxy(logger)
 	udpProxy := proxy.NewUDPProxy(logger)
 	listenerMgr := proxy.NewListenerManager(engine, resolver, l4proxy, logger)
@@ -101,6 +102,47 @@ func run(args []string) error {
 		}
 	}()
 	logger.Info("ext_authz server starting", "addr", *authzAddr)
+
+	// Standalone mode: generate envoy config and apply overrides BEFORE
+	// starting listeners so they use the correct forward addresses.
+	if *standalone {
+		result, err := envoy.GenerateStandaloneConfig(cfg, *authzAddr)
+		if err != nil {
+			cancel()
+			wg.Wait()
+			return fmt.Errorf("generate envoy config: %w", err)
+		}
+
+		for i := range cfg.Listeners {
+			if ov, ok := result.Overrides[cfg.Listeners[i].Name]; ok {
+				cfg.Listeners[i].Forward = ov.Forward
+				cfg.Listeners[i].ProxyProtocol = ov.ProxyProtocol
+				logger.Info("standalone: routing L7 listener through envoy",
+					"name", cfg.Listeners[i].Name,
+					"envoy_addr", ov.Forward,
+				)
+			}
+		}
+
+		tmpFile, err := os.CreateTemp("", "tailvoy-envoy-*.yaml")
+		if err != nil {
+			cancel()
+			wg.Wait()
+			return fmt.Errorf("create temp config: %w", err)
+		}
+		defer func() { _ = os.Remove(tmpFile.Name()) }()
+
+		if _, err := tmpFile.WriteString(result.BootstrapYAML); err != nil {
+			tmpFile.Close()
+			cancel()
+			wg.Wait()
+			return fmt.Errorf("write envoy config: %w", err)
+		}
+		tmpFile.Close()
+
+		envoyArgs = append([]string{"-c", tmpFile.Name()}, envoyArgs...)
+		logger.Info("generated standalone envoy config", "path", tmpFile.Name())
+	}
 
 	// Get the tailscale IPv4 for UDP listeners (ListenPacket requires an IP).
 	ip4, _ := ts.TailscaleIPs()
@@ -153,47 +195,6 @@ func run(args []string) error {
 		}
 	}
 
-	// Standalone mode: generate envoy bootstrap config from policy.
-	if *standalone {
-		result, err := envoy.GenerateStandaloneConfig(cfg, *authzAddr)
-		if err != nil {
-			cancel()
-			wg.Wait()
-			return fmt.Errorf("generate envoy config: %w", err)
-		}
-
-		// Apply L7 forwarding overrides so tsnet routes through Envoy.
-		for i := range cfg.Listeners {
-			if ov, ok := result.Overrides[cfg.Listeners[i].Name]; ok {
-				cfg.Listeners[i].Forward = ov.Forward
-				cfg.Listeners[i].ProxyProtocol = ov.ProxyProtocol
-				logger.Info("standalone: routing L7 listener through envoy",
-					"name", cfg.Listeners[i].Name,
-					"envoy_addr", ov.Forward,
-				)
-			}
-		}
-
-		tmpFile, err := os.CreateTemp("", "tailvoy-envoy-*.yaml")
-		if err != nil {
-			cancel()
-			wg.Wait()
-			return fmt.Errorf("create temp config: %w", err)
-		}
-		defer func() { _ = os.Remove(tmpFile.Name()) }()
-
-		if _, err := tmpFile.WriteString(result.BootstrapYAML); err != nil {
-			tmpFile.Close()
-			cancel()
-			wg.Wait()
-			return fmt.Errorf("write envoy config: %w", err)
-		}
-		tmpFile.Close()
-
-		envoyArgs = append([]string{"-c", tmpFile.Name()}, envoyArgs...)
-		logger.Info("generated standalone envoy config", "path", tmpFile.Name())
-	}
-
 	// Start envoy if args are present.
 	if len(envoyArgs) > 0 {
 		envoyMgr := envoy.NewManager(logger)
@@ -219,6 +220,8 @@ func run(args []string) error {
 			if err := envoyMgr.Wait(); err != nil {
 				logger.Error("envoy exited", "err", err)
 			}
+			signal.Stop(sigCh)
+			close(sigCh)
 			cancel()
 		}()
 	}

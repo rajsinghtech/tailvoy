@@ -141,7 +141,7 @@ listeners:
 			if err == nil {
 				t.Fatal("expected error, got nil")
 			}
-			if got := err.Error(); !contains(got, tt.want) {
+			if got := err.Error(); !strings.Contains(got, tt.want) {
 				t.Errorf("error = %q, want substring %q", got, tt.want)
 			}
 		})
@@ -207,18 +207,6 @@ func TestLoadMissingFile(t *testing.T) {
 	}
 }
 
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsSubstring(s, substr))
-}
-
-func containsSubstring(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
-}
 
 // ---------------------------------------------------------------------------
 // Config validation edge cases
@@ -252,7 +240,7 @@ listeners:
 	if err == nil {
 		t.Fatal("expected error for empty forward")
 	}
-	if !contains(err.Error(), "forward is required") {
+	if !strings.Contains(err.Error(), "forward is required") {
 		t.Errorf("error = %q, want substring %q", err.Error(), "forward is required")
 	}
 }
@@ -406,7 +394,7 @@ listeners:
 	if err == nil {
 		t.Fatal("expected error for missing listener name")
 	}
-	if !contains(err.Error(), "name is required") {
+	if !strings.Contains(err.Error(), "name is required") {
 		t.Errorf("error = %q, want substring %q", err.Error(), "name is required")
 	}
 }

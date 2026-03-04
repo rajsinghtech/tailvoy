@@ -3,6 +3,8 @@ package envoy
 import (
 	"fmt"
 	"net"
+	"strconv"
+	"strings"
 
 	"github.com/rajsinghtech/tailvoy/internal/config"
 	"gopkg.in/yaml.v3"
@@ -365,11 +367,8 @@ func perRouteExtAuthz(listenerName string) map[string]interface{} {
 func splitHostPort(addr string) (host, port string) {
 	h, p, err := net.SplitHostPort(addr)
 	if err != nil {
-		// Fallback: try to find last colon
-		for i := len(addr) - 1; i >= 0; i-- {
-			if addr[i] == ':' {
-				return addr[:i], addr[i+1:]
-			}
+		if i := strings.LastIndex(addr, ":"); i >= 0 {
+			return addr[:i], addr[i+1:]
 		}
 		return addr, ""
 	}
@@ -377,14 +376,11 @@ func splitHostPort(addr string) (host, port string) {
 }
 
 // portInt converts a port string to an integer for Envoy config. Returns 0 on
-// parse failure, which will surface as an Envoy validation error.
+// parse failure or negative values, which will surface as an Envoy validation error.
 func portInt(port string) int {
-	var n int
-	for _, c := range port {
-		if c < '0' || c > '9' {
-			return 0
-		}
-		n = n*10 + int(c-'0')
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 0 {
+		return 0
 	}
 	return n
 }

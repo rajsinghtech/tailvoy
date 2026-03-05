@@ -198,23 +198,24 @@ func run(args []string) error {
 			}
 		}()
 	} else {
-		// Static mode: start listeners via ListenService.
+		// Static mode: start listeners via both ListenService (VIP) and Listen (node IP).
 		svcName := cfg.Tailscale.ServiceName()
 
-		// Collect TCP ports, warn and skip UDP.
+		// Collect TCP ports, warn and skip UDP for VIP service.
 		var tcpPorts []string
 		var tcpListeners []*config.Listener
+		var udpListeners []*config.Listener
 		for i := range cfg.Listeners {
 			l := &cfg.Listeners[i]
 			if l.Protocol == "udp" {
-				logger.Warn("UDP listeners not supported with VIP services, skipping", "name", l.Name)
+				udpListeners = append(udpListeners, l)
 				continue
 			}
 			tcpPorts = append(tcpPorts, l.Port())
 			tcpListeners = append(tcpListeners, l)
 		}
 
-		// Create/update VIP service with discovered ports.
+		// Create/update VIP service with TCP ports.
 		if len(tcpPorts) > 0 {
 			if err := svcMgr.Ensure(ctx, tcpPorts); err != nil {
 				cancel()
@@ -223,7 +224,7 @@ func run(args []string) error {
 			}
 		}
 
-		// Start TCP listeners via ListenService.
+		// Start TCP listeners via ListenService (VIP) and Listen (node IP).
 		for _, l := range tcpListeners {
 			l := l
 			port, err := strconv.ParseUint(l.Port(), 10, 16)
@@ -232,7 +233,9 @@ func run(args []string) error {
 				wg.Wait()
 				return fmt.Errorf("invalid port for %s: %w", l.Name, err)
 			}
-			ln, err := ts.ListenService(svcName, tsnet.ServiceModeTCP{Port: uint16(port)})
+
+			// VIP service listener — reachable via the service's virtual IP.
+			svcLn, err := ts.ListenService(svcName, tsnet.ServiceModeTCP{Port: uint16(port)})
 			if err != nil {
 				cancel()
 				wg.Wait()
@@ -243,10 +246,47 @@ func run(args []string) error {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				if err := listenerMgr.Serve(ctx, ln, l); err != nil {
-					logger.Error("listener error", "name", l.Name, "err", err)
+				if err := listenerMgr.Serve(ctx, svcLn, l); err != nil {
+					logger.Error("service listener error", "name", l.Name, "err", err)
 				}
 			}()
+
+			// Node IP listener — reachable via the node's direct tailscale IP.
+			nodeLn, err := ts.Listen("tcp", ":"+l.Port())
+			if err != nil {
+				logger.Warn("node listener failed, VIP-only", "name", l.Name, "port", port, "err", err)
+			} else {
+				logger.Info("node listener started", "name", l.Name, "port", port)
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					if err := listenerMgr.Serve(ctx, nodeLn, l); err != nil {
+						logger.Error("node listener error", "name", l.Name, "err", err)
+					}
+				}()
+			}
+		}
+
+		// Start UDP listeners on the node IP (VIP services don't support UDP).
+		if tsIP != "" {
+			for _, l := range udpListeners {
+				l := l
+				pc, err := ts.ListenPacket("udp", tsIP+":"+l.Port())
+				if err != nil {
+					logger.Error("udp listener error", "name", l.Name, "err", err)
+					continue
+				}
+				logger.Info("udp listener started", "name", l.Name, "addr", tsIP+":"+l.Port())
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					if err := udpProxy.Serve(ctx, pc, l.Forward, resolver, engine, l.Name); err != nil {
+						logger.Error("udp serve error", "name", l.Name, "err", err)
+					}
+				}()
+			}
+		} else if len(udpListeners) > 0 {
+			logger.Warn("no tailscale IPv4, skipping UDP listeners")
 		}
 
 	}

@@ -97,58 +97,9 @@ if [ -z "$NODE_IP" ] || [ "$NODE_IP" = "null" ]; then
     exit 1
 fi
 
-# --- Wait for VIP service ---
-echo "=== Waiting for VIP service ==="
-IP=""
-SVC_NAME="svc:tailvoy-docker-test"
-# Get OAuth token to query Tailscale API for VIP service addresses
-TS_TOKEN=$(curl -sf -X POST \
-    -d "client_id=$TS_CLIENT_ID" \
-    -d "client_secret=$TS_CLIENT_SECRET" \
-    -d "grant_type=client_credentials" \
-    "https://api.tailscale.com/api/v2/oauth/token" | jq -r '.access_token')
-if [ -z "$TS_TOKEN" ] || [ "$TS_TOKEN" = "null" ]; then
-    echo "FATAL: Failed to get Tailscale API token"
-    exit 1
-fi
-for i in $(seq 1 30); do
-    IP=$(curl -sf -H "Authorization: Bearer $TS_TOKEN" \
-        "https://api.tailscale.com/api/v2/tailnet/-/vip-services/${SVC_NAME}" \
-        | jq -r '[.addrs[] | select(contains(":") | not)] | .[0]' 2>/dev/null || true)
-    if [ -n "$IP" ] && [ "$IP" != "null" ]; then
-        echo "VIP service $SVC_NAME at $IP"
-        break
-    fi
-    echo "  waiting for VIP service $SVC_NAME (attempt $i)..."
-    sleep 2
-done
-if [ -z "$IP" ] || [ "$IP" = "null" ]; then
-    echo "FATAL: VIP service $SVC_NAME not found"
-    curl -sf -H "Authorization: Bearer $TS_TOKEN" \
-        "https://api.tailscale.com/api/v2/tailnet/-/vip-services/${SVC_NAME}" 2>&1 || true
-    docker compose -f "$COMPOSE_FILE" logs tailvoy 2>&1 | tail -30
-    exit 1
-fi
+# Use node IP for tests — tailvoy listens on both VIP service and node IP.
+IP="$NODE_IP"
 sleep 5
-
-# Debug: check VIP routing
-echo "=== Debug: VIP routing ==="
-echo "tailscale version: $(tailscale version 2>&1 | head -1)"
-echo "Node IP: $NODE_IP, VIP IP: $IP"
-echo "--- tailscale status ---"
-tailscale status 2>/dev/null || true
-echo "--- ping node IP ---"
-tailscale ping --c 1 "$NODE_IP" 2>&1 || true
-echo "--- ping VIP IP ---"
-tailscale ping --c 1 "$IP" 2>&1 || true
-echo "--- curl node IP :80 ---"
-curl -sf -o /dev/null -w "%{http_code}" --max-time 5 "http://$NODE_IP:80/" 2>&1 || echo "failed"
-echo ""
-echo "--- curl VIP IP :80 ---"
-curl -sf -o /dev/null -w "%{http_code}" --max-time 5 "http://$IP:80/" 2>&1 || echo "failed"
-echo ""
-echo "--- tailvoy container logs ---"
-docker compose -f "$COMPOSE_FILE" logs tailvoy 2>&1 | tail -30
 
 # Check Envoy is healthy
 echo "=== Checking Envoy health ==="

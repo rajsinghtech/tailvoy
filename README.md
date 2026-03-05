@@ -16,7 +16,7 @@ Tailnet Client (100.x.x.x)
 
 ## How it works
 
-tailvoy embeds [tsnet](https://pkg.go.dev/tailscale.com/tsnet) to join the tailnet directly -- no sidecar Tailscale daemon needed. Every inbound connection triggers a WhoIs lookup to resolve the caller's Tailscale identity and peer capabilities.
+tailvoy embeds [tsnet](https://pkg.go.dev/tailscale.com/tsnet) to join the tailnet as an ephemeral OAuth node -- no sidecar Tailscale daemon needed. It uses Tailscale [VIP services](https://tailscale.com/kb/1432/vip-services) (via `tsnet.ListenService`) so multiple replicas can serve the same stable service address. Every inbound connection triggers a WhoIs lookup to resolve the caller's Tailscale identity and peer capabilities.
 
 Authorization is driven entirely by Tailscale ACL grants using the `rajsingh.info/cap/tailvoy` capability. Each cap rule has three optional dimensions:
 
@@ -31,6 +31,44 @@ Authorization is driven entirely by Tailscale ACL grants using the `rajsingh.inf
 **Omitted dimension**: unrestricted on that dimension.
 
 The policy file (`policy.yaml`) only defines infrastructure -- Tailscale identity and listener configuration. All authorization lives in your Tailscale ACL.
+
+## Authentication
+
+tailvoy authenticates to Tailscale using OAuth client credentials. Create an OAuth client in the Tailscale admin console and provide the ID and secret via environment variables:
+
+```yaml
+tailscale:
+  hostname: "my-gw"
+  clientId: "${TS_CLIENT_ID}"
+  clientSecret: "${TS_CLIENT_SECRET}"
+  tags:
+    - "tag:my-gw"        # ACL tags for the tailvoy node itself
+  serviceTags:
+    - "tag:my-gw"        # ACL tags for the VIP service
+```
+
+- **`tags`**: Applied to the ephemeral tsnet node. Must match your ACL `tagOwners`.
+- **`serviceTags`**: Applied to the VIP service that exposes listeners on the tailnet. Must match `autoApprovers.services` in your ACL.
+- **`service`** (optional): Explicit VIP service name. Defaults to `svc:<hostname>`.
+
+tailvoy creates the VIP service on startup via the Tailscale API and advertises TCP ports for each listener. The service persists across restarts so multiple replicas can serve the same address.
+
+> **Note:** UDP listeners are not yet supported by VIP services. tailvoy will log a warning and skip UDP listeners in VIP mode. The UDP proxy code is retained for future support.
+
+### Required ACL configuration
+
+```jsonc
+{
+    "tagOwners": {
+        "tag:my-gw": ["autogroup:admin"]
+    },
+    "autoApprovers": {
+        "services": {
+            "svc:my-gw": ["tag:my-gw"]
+        }
+    }
+}
+```
 
 ## Listener modes
 
@@ -65,8 +103,12 @@ A web app where different users get access to different paths.
 ```yaml
 tailscale:
   hostname: "web-gw"
-  authkey: "${TS_AUTHKEY}"
-  ephemeral: true
+  clientId: "${TS_CLIENT_ID}"
+  clientSecret: "${TS_CLIENT_SECRET}"
+  tags:
+    - "tag:web-gw"
+  serviceTags:
+    - "tag:web-gw"
 
 listeners:
   - name: http
@@ -166,6 +208,8 @@ listeners:
 ```
 
 ### UDP (e.g. DNS)
+
+> **Note:** UDP listeners are not currently supported by VIP services. In static mode, tailvoy will skip UDP listeners with a warning. UDP proxy code is retained for future VIP service support.
 
 **policy.yaml:**
 ```yaml
@@ -301,8 +345,12 @@ Instead of declaring listeners manually, let tailvoy discover them from Envoy's 
 ```yaml
 tailscale:
   hostname: "my-gateway"
-  authkey: "${TS_AUTHKEY}"
-  ephemeral: true
+  clientId: "${TS_CLIENT_ID}"
+  clientSecret: "${TS_CLIENT_SECRET}"
+  tags:
+    - "tag:my-gateway"
+  serviceTags:
+    - "tag:my-gateway"
 
 discovery:
   envoyAdmin: "http://127.0.0.1:19000"
@@ -345,8 +393,12 @@ A single tailvoy instance handling HTTP, TCP, UDP, gRPC, and TLS -- each on its 
 ```yaml
 tailscale:
   hostname: "my-gateway"
-  authkey: "${TS_AUTHKEY}"
-  ephemeral: true
+  clientId: "${TS_CLIENT_ID}"
+  clientSecret: "${TS_CLIENT_SECRET}"
+  tags:
+    - "tag:my-gateway"
+  serviceTags:
+    - "tag:my-gateway"
 
 listeners:
   - name: http
@@ -512,11 +564,16 @@ spec:
                       command: ["tailvoy", "--policy", "/etc/tailvoy/policy.yaml",
                                 "--authz-addr", "0.0.0.0:9001", "--"]
                       env:
-                        - name: TS_AUTHKEY
+                        - name: TS_CLIENT_ID
                           valueFrom:
                             secretKeyRef:
-                              name: tailvoy-authkey
-                              key: TS_AUTHKEY
+                              name: tailvoy-oauth
+                              key: TS_CLIENT_ID
+                        - name: TS_CLIENT_SECRET
+                          valueFrom:
+                            secretKeyRef:
+                              name: tailvoy-oauth
+                              key: TS_CLIENT_SECRET
                       volumeMounts:
                         - name: tailvoy-policy
                           mountPath: /etc/tailvoy
@@ -565,7 +622,9 @@ Any arguments after `--` are passed directly to Envoy.
 ### Docker
 
 ```sh
-docker run -e TS_AUTHKEY=tskey-auth-... \
+docker run \
+  -e TS_CLIENT_ID=tskey-client-... \
+  -e TS_CLIENT_SECRET=tskey-client-secret-... \
   -v $(pwd)/policy.yaml:/policy.yaml \
   ghcr.io/rajsinghtech/tailvoy:latest \
   -policy /policy.yaml -standalone
@@ -646,8 +705,8 @@ Denied L7 requests return HTTP 403 with a JSON body:
 make test              # unit tests with race detector
 make lint              # golangci-lint
 make cover             # coverage report
-make integration-test  # docker compose integration tests (requires TS_AUTHKEY)
-make kind-test         # kind cluster integration tests (requires TS_AUTHKEY)
+make integration-test  # docker compose integration tests (requires TS_CLIENT_ID, TS_CLIENT_SECRET)
+make kind-test         # kind cluster integration tests (requires TS_CLIENT_ID, TS_CLIENT_SECRET)
 make docker-build      # build container image
 ```
 

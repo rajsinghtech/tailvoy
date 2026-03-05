@@ -21,6 +21,8 @@ jobs:
     outputs:
       tailnet_name: ${{ steps.create.outputs.tailnet_name }}
       ts_authkey: ${{ steps.authkey.outputs.ts_authkey }}
+      ts_client_id: ${{ steps.create.outputs.oauth_client_id }}
+      ts_client_secret: ${{ steps.create.outputs.oauth_client_secret }}
       oauth_client_id: ${{ steps.create.outputs.oauth_client_id }}
       oauth_client_secret: ${{ steps.create.outputs.oauth_client_secret }}
 
@@ -133,7 +135,8 @@ jobs:
 
       - name: Run kind integration tests
         env:
-          TS_AUTHKEY: ${{ needs.setup-tailnet.outputs.ts_authkey }}
+          TS_CLIENT_ID: ${{ needs.setup-tailnet.outputs.ts_client_id }}
+          TS_CLIENT_SECRET: ${{ needs.setup-tailnet.outputs.ts_client_secret }}
         run: make kind-test
 
       - name: Collect logs on failure
@@ -170,7 +173,8 @@ jobs:
 
       - name: Run docker-compose integration tests
         env:
-          TS_AUTHKEY: ${{ needs.setup-tailnet.outputs.ts_authkey }}
+          TS_CLIENT_ID: ${{ needs.setup-tailnet.outputs.ts_client_id }}
+          TS_CLIENT_SECRET: ${{ needs.setup-tailnet.outputs.ts_client_secret }}
         run: make integration-test
 
       - name: Collect logs on failure

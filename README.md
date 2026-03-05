@@ -14,558 +14,70 @@ Tailnet Client (100.x.x.x)
    Backend Service
 ```
 
-## How it works
-
-tailvoy embeds [tsnet](https://pkg.go.dev/tailscale.com/tsnet) to join the tailnet as an ephemeral OAuth node -- no sidecar Tailscale daemon needed. It uses [Tailscale Services](https://tailscale.com/docs/features/tailscale-services) (via `tsnet.ListenService`) so multiple replicas can serve the same stable service address. Every inbound connection triggers a WhoIs lookup to resolve the caller's Tailscale identity and peer capabilities.
-
-Authorization is driven entirely by Tailscale ACL grants using the `rajsingh.info/cap/tailvoy` capability. Each cap rule has three optional dimensions:
-
-| Dimension | Controls | Source |
-|-----------|----------|--------|
-| `listeners` | Which named listeners a peer can connect to | Listener name from config.yaml (static) or Envoy dynamic listener name (discovery) |
-| `routes` | Which HTTP/gRPC paths are accessible (L7 only) | Request path |
-| `hostnames` | Which hostnames are allowed (SNI or Host header) | TLS ClientHello SNI / HTTP Host header |
-
-**Within a rule**: AND -- all specified dimensions must match.
-**Across rules**: OR -- any matching rule grants access.
-**Omitted dimension**: unrestricted on that dimension.
-
-The config file (`config.yaml`) only defines infrastructure -- Tailscale identity and listener configuration. All authorization lives in your Tailscale ACL.
-
-## Authentication
-
-tailvoy authenticates to Tailscale using OAuth client credentials. Create an OAuth client in the Tailscale admin console and provide the ID and secret via environment variables (`TS_CLIENT_ID` and `TS_CLIENT_SECRET`).
-
-```yaml
-tailscale:
-  service: "my-gw"
-  tags:
-    - "tag:my-gw"        # ACL tags for the tailvoy node itself
-  serviceTags:
-    - "tag:my-gw"        # ACL tags for the VIP service
-```
-
-- **`service`**: The service name. The tsnet node hostname is derived as `<service>-tailvoy` and the VIP service name as `svc:<service>`.
-- **`tags`**: Applied to the ephemeral tsnet node. Must match your ACL `tagOwners`.
-- **`serviceTags`**: Applied to the VIP service that exposes listeners on the tailnet. Must match `autoApprovers.services` in your ACL.
-
-tailvoy creates the VIP service on startup via the Tailscale API and advertises TCP ports for each listener. The service persists across restarts so multiple replicas can serve the same address.
-
-> **Note:** UDP listeners are not yet supported by VIP services. tailvoy will log a warning and skip UDP listeners in VIP mode. The UDP proxy code is retained for future support.
-
-### Required ACL configuration
-
-```jsonc
-{
-    "tagOwners": {
-        "tag:my-gw": ["autogroup:admin"]
-    },
-    "autoApprovers": {
-        "services": {
-            "svc:my-gw": ["tag:my-gw"]
-        }
-    }
-}
-```
-
-## Listener modes
-
-tailvoy supports two mutually exclusive ways to define listeners:
-
-- **Static listeners** (`listeners`): You declare every listener explicitly in config.yaml. The `protocol` field determines behavior. tailvoy auto-generates Envoy bootstrap config for L7 listeners and manages Envoy as a subprocess.
-- **Discovery mode** (`discovery`): tailvoy polls Envoy's admin API to auto-discover listeners. No listener config needed -- tailvoy creates and removes tsnet listeners dynamically as Envoy's configuration changes.
-
-Discovery mode is ideal for Envoy Gateway deployments where listeners are managed by Gateway API resources and change over time. Static mode is better when you want explicit control.
-
-## Listeners
-
-Listeners are declared as a named map in config.yaml. The map key is the listener name (used in ACL cap rules). The `protocol` field determines behavior:
-
-- **`http`**, **`https`**, **`grpc`**: L7 protocols. Traffic is routed through Envoy with ext_authz for path-level policy. Use `routes` to define backends.
-- **`tls`**: TLS passthrough. tailvoy peeks at ClientHello for SNI-based hostname gating, then forwards the raw connection.
-- **`tcp`**: Plain TCP forwarding after identity check.
-- **`udp`**: UDP forwarding after identity check.
-
-```yaml
-listeners:
-  web:
-    port: 443
-    protocol: https
-    tls:
-      cert: /certs/cert.pem
-      key: /certs/key.pem
-    routes:
-      - hostname: app.example.com
-        paths:
-          /api/*: api:8080
-          /*: frontend:3000
-      - backend: fallback:8080
-
-  postgres:
-    port: 5432
-    protocol: tcp
-    backend: db:5432
-```
-
-## Cap rule schema
-
-```jsonc
-"rajsingh.info/cap/tailvoy": [
-    {
-        "listeners": ["http", "grpc"],  // optional: which listeners
-        "routes": ["/api/*", "/health"],  // optional: which paths (L7 only)
-        "hostnames": ["app.example.com"]  // optional: which hostnames
-    }
-]
-```
-
-An empty rule `[{}]` grants full access to all listeners, paths, and hostnames.
-
-## Examples
-
-### HTTP with path-based access control
-
-A web app where different users get access to different paths.
-
-**config.yaml:**
-```yaml
-tailscale:
-  service: "web-gw"
-  tags:
-    - "tag:web-gw"
-  serviceTags:
-    - "tag:web-gw"
-
-listeners:
-  http:
-    port: 80
-    protocol: http
-    routes:
-      - backend: 127.0.0.1:8080
-```
-
-**ACL grants:**
-```jsonc
-{
-    "grants": [
-        {
-            "src": ["alice@example.com"],
-            "dst": ["tag:web-gw"],
-            "app": {
-                "rajsingh.info/cap/tailvoy": [{
-                    "listeners": ["http"],
-                    "routes": ["/api/*", "/health"]
-                }]
-            }
-        },
-        {
-            "src": ["group:admins"],
-            "dst": ["tag:web-gw"],
-            "app": {
-                "rajsingh.info/cap/tailvoy": [{
-                    "listeners": ["http"],
-                    "routes": ["/*"]
-                }]
-            }
-        }
-    ]
-}
-```
-
-**Result:**
-| Caller | `GET /api/users` | `GET /health` | `GET /admin/settings` |
-|--------|:---:|:---:|:---:|
-| alice@example.com | 200 | 200 | 403 |
-| bob@example.com (in group:admins) | 200 | 200 | 200 |
-| eve@example.com (no cap) | conn reset | conn reset | conn reset |
-
-### Listener-scoped access
-
-Restrict which listeners a peer can connect to. A DBA gets postgres but not HTTP:
-
-```jsonc
-// DBA: only postgres listener
-{
-    "src": ["tag:dba"],
-    "dst": ["tag:my-gateway"],
-    "app": {
-        "rajsingh.info/cap/tailvoy": [{"listeners": ["postgres"]}]
-    }
-}
-// Frontend: only HTTP listener with path restrictions
-{
-    "src": ["tag:frontend"],
-    "dst": ["tag:my-gateway"],
-    "app": {
-        "rajsingh.info/cap/tailvoy": [{
-            "listeners": ["http"],
-            "routes": ["/api/*", "/health"]
-        }]
-    }
-}
-```
-
-The DBA can connect to the postgres listener but not HTTP. The frontend can hit HTTP `/api/*` but not postgres.
-
-### TCP (e.g. Postgres)
-
-A database port that only tagged nodes can reach. No L7 policy -- just L4 identity gating.
-
-**config.yaml:**
-```yaml
-listeners:
-  postgres:
-    port: 5432
-    protocol: tcp
-    backend: 127.0.0.1:5432
-```
-
-**ACL grants:**
-```jsonc
-{
-    "src": ["tag:backend"],
-    "dst": ["tag:db-gw"],
-    "app": {
-        "rajsingh.info/cap/tailvoy": [{"listeners": ["postgres"]}]
-    }
-}
-```
-
-### UDP (e.g. DNS)
-
-> **Note:** UDP listeners are not currently supported by VIP services. tailvoy will skip UDP listeners with a warning. UDP proxy code is retained for future VIP service support.
-
-**config.yaml:**
-```yaml
-listeners:
-  dns:
-    port: 53
-    protocol: udp
-    backend: 127.0.0.1:1053
-```
-
-**ACL grants:**
-```jsonc
-{
-    "src": ["autogroup:member"],
-    "dst": ["tag:dns-gw"],
-    "app": {
-        "rajsingh.info/cap/tailvoy": [{"listeners": ["dns"]}]
-    }
-}
-```
-
-All tailnet members can send DNS queries. Non-members are dropped at L4.
-
-### gRPC with service-level access control
-
-gRPC paths follow the `/package.Service/Method` convention. Route matching works the same as HTTP.
-
-**config.yaml:**
-```yaml
-listeners:
-  grpc:
-    port: 50051
-    protocol: grpc
-    tls:
-      cert: /certs/cert.pem
-      key: /certs/key.pem
-    routes:
-      - backend: 127.0.0.1:50051
-```
-
-**ACL grants:**
-```jsonc
-{
-    "src": ["tag:frontend"],
-    "dst": ["tag:grpc-gw"],
-    "app": {
-        "rajsingh.info/cap/tailvoy": [{
-            "listeners": ["grpc"],
-            "routes": [
-                "/grpc.health.v1.Health/*",
-                "/myapp.UserService/*"
-            ]
-        }]
-    }
-}
-```
-
-**Result:**
-| Caller | `Health/Check` | `UserService/GetUser` | `AdminService/DeleteUser` |
-|--------|:---:|:---:|:---:|
-| tag:frontend | 200 | 200 | 403 |
-
-### TLS passthrough with hostname gating
-
-tailvoy forwards the raw TLS connection without terminating it. It peeks at the TLS ClientHello to extract the SNI server name for hostname-based access control.
-
-**config.yaml:**
-```yaml
-listeners:
-  tls:
-    port: 443
-    protocol: tls
-    routes:
-      - hostname: app.example.com
-        backend: 127.0.0.1:8443
-      - hostname: admin.example.com
-        backend: 127.0.0.1:8444
-```
-
-**ACL grants:**
-```jsonc
-// Engineers can access app.example.com
-{
-    "src": ["group:engineers"],
-    "dst": ["tag:tls-gw"],
-    "app": {
-        "rajsingh.info/cap/tailvoy": [{
-            "listeners": ["tls"],
-            "hostnames": ["app.example.com"]
-        }]
-    }
-}
-// Ops can access any hostname
-{
-    "src": ["group:ops"],
-    "dst": ["tag:tls-gw"],
-    "app": {
-        "rajsingh.info/cap/tailvoy": [{
-            "listeners": ["tls"],
-            "hostnames": ["*.example.com"]
-        }]
-    }
-}
-```
-
-**Result:**
-| Caller | `app.example.com` | `admin.example.com` |
-|--------|:---:|:---:|
-| group:engineers | allowed | conn reset |
-| group:ops | allowed | allowed |
-
-### HTTP with hostname-based virtual hosting
-
-For L7 listeners, hostnames match against the HTTP `Host` header (or `:authority` for gRPC):
-
-```jsonc
-{
-    "src": ["tag:frontend"],
-    "dst": ["tag:my-gateway"],
-    "app": {
-        "rajsingh.info/cap/tailvoy": [{
-            "listeners": ["http"],
-            "hostnames": ["api.example.com"],
-            "routes": ["/v1/*"]
-        }]
-    }
-}
-```
-
-This grants access only to `api.example.com` on the HTTP listener, and only for `/v1/*` paths. All three dimensions must match (AND).
-
-### Discovery mode (Envoy Gateway)
-
-Instead of declaring listeners manually, let tailvoy discover them from Envoy's admin API. Listeners are created and removed automatically as Gateway resources change.
-
-**config.yaml:**
-```yaml
-tailscale:
-  service: "my-gateway"
-  tags:
-    - "tag:my-gateway"
-  serviceTags:
-    - "tag:my-gateway"
-
-discovery:
-  envoyAdmin: "http://127.0.0.1:19000"
-  envoyAddress: "127.0.0.1"
-  pollInterval: "5s"
-  proxyProtocol: v2
-```
-
-tailvoy polls Envoy's `/config_dump` endpoint, parses dynamic listeners, and creates tsnet listeners for each one. L7 detection is automatic -- if a listener's filter chain contains `http_connection_manager`, tailvoy enables L7 policy for it.
-
-Discovered listener names follow Envoy Gateway's naming convention: `<namespace>/<gateway>/<listener>` (e.g., `default/eg/http`). Use these names in your ACL grants:
-
-```jsonc
-{
-    "src": ["tag:frontend"],
-    "dst": ["tag:my-gateway"],
-    "app": {
-        "rajsingh.info/cap/tailvoy": [{
-            "listeners": ["default/eg/http"],
-            "routes": ["/api/*", "/health"]
-        }]
-    }
-}
-```
-
-For L7 listeners, SecurityPolicy `contextExtensions` must also use the full listener name:
-
-```yaml
-contextExtensions:
-  - name: listener
-    type: Value
-    value: "default/eg/http"
-```
-
-### Multi-listener gateway
-
-A single tailvoy instance handling HTTP, TCP, UDP, gRPC, and TLS -- each on its own port.
-
-**config.yaml:**
-```yaml
-tailscale:
-  service: "my-gateway"
-  tags:
-    - "tag:my-gateway"
-  serviceTags:
-    - "tag:my-gateway"
-
-listeners:
-  http:
-    port: 80
-    protocol: http
-    routes:
-      - backend: 127.0.0.1:8080
-
-  grpc:
-    port: 50051
-    protocol: grpc
-    tls:
-      cert: /certs/cert.pem
-      key: /certs/key.pem
-    routes:
-      - backend: 127.0.0.1:8081
-
-  postgres:
-    port: 5432
-    protocol: tcp
-    backend: 127.0.0.1:5432
-
-  dns:
-    port: 53
-    protocol: udp
-    backend: 127.0.0.1:1053
-
-  tls:
-    port: 443
-    protocol: tls
-    routes:
-      - hostname: app.example.com
-        backend: 127.0.0.1:8443
-```
-
-Different teams get scoped access:
-
-```jsonc
-// Frontend: HTTP + gRPC health only
-{
-    "src": ["tag:frontend"],
-    "dst": ["tag:my-gateway"],
-    "app": {
-        "rajsingh.info/cap/tailvoy": [{
-            "listeners": ["http", "grpc"],
-            "routes": ["/api/*", "/grpc.health.v1.Health/*"]
-        }]
-    }
-}
-// DBA: postgres only
-{
-    "src": ["tag:dba"],
-    "dst": ["tag:my-gateway"],
-    "app": {
-        "rajsingh.info/cap/tailvoy": [{"listeners": ["postgres"]}]
-    }
-}
-// Ops: full access to everything
-{
-    "src": ["group:ops"],
-    "dst": ["tag:my-gateway"],
-    "app": {
-        "rajsingh.info/cap/tailvoy": [{}]
-    }
-}
-```
-
-### Grant merging
-
-Multiple matching grants produce multiple cap rules. Rules are evaluated independently (OR):
-
-```jsonc
-// Grant 1: alice gets HTTP /api/*
-{
-    "src": ["alice@example.com"],
-    "dst": ["tag:gw"],
-    "app": {
-        "rajsingh.info/cap/tailvoy": [{
-            "listeners": ["http"],
-            "routes": ["/api/*"]
-        }]
-    }
-},
-// Grant 2: group:eng (includes alice) gets postgres
-{
-    "src": ["group:eng"],
-    "dst": ["tag:gw"],
-    "app": {
-        "rajsingh.info/cap/tailvoy": [{"listeners": ["postgres"]}]
-    }
-}
-// alice's effective rules: [
-//   {listeners: ["http"], routes: ["/api/*"]},
-//   {listeners: ["postgres"]}
-// ]
-// alice can access HTTP /api/* AND postgres
-```
-
-## Deployment modes
-
-- **Standalone** (default): tailvoy auto-generates Envoy bootstrap config and manages Envoy as a subprocess. No Envoy YAML needed. Uses static listeners from config.yaml.
-- **Envoy Gateway data plane**: tailvoy replaces the default Envoy image via the `EnvoyProxy` CRD, acting as the data plane for [Envoy Gateway](https://gateway.envoyproxy.io/). EG manages routing via xDS while tailvoy handles Tailscale ingress and cap-based policy. Uses discovery mode (recommended).
-
-## Supported protocols
-
-| Protocol | Listener config | Policy check |
-|----------|----------------|-------------|
-| HTTP | `protocol: http` | L4 (listener + hostname) + L7 (route) |
-| HTTPS | `protocol: https` | L4 (listener + hostname) + L7 (route) |
-| gRPC | `protocol: grpc` | L4 (listener + hostname) + L7 (route) |
-| TLS passthrough | `protocol: tls` | L4 (listener + SNI hostname) |
-| TCP | `protocol: tcp` | L4 (listener only) |
-| UDP | `protocol: udp` | L4 (listener only) |
-
-## Install
-
-### Docker (recommended)
+## Quickstart
 
 ```sh
 docker pull ghcr.io/rajsinghtech/tailvoy:latest
 ```
 
-### Build from source
+Create `config.yaml`:
 
-```sh
-make build
+```yaml
+tailscale:
+  service: "my-gw"
+  tags: ["tag:my-gw"]
+  serviceTags: ["tag:my-gw"]
+
+listeners:
+  http:
+    port: 80
+    protocol: http
+    routes:
+      - backend: 127.0.0.1:8080
 ```
 
-Requires Go 1.25+.
+Run:
 
-## Usage
+```sh
+docker run \
+  -e TS_CLIENT_ID=... \
+  -e TS_CLIENT_SECRET=... \
+  -v $(pwd)/config.yaml:/config.yaml \
+  ghcr.io/rajsinghtech/tailvoy:latest \
+  -config /config.yaml
+```
 
-### Standalone mode
+tailvoy connects to the tailnet, creates a VIP service, generates Envoy config, and starts proxying. Authorization is controlled entirely by your Tailscale ACL -- the config file only defines infrastructure.
+
+## How it works
+
+tailvoy embeds [tsnet](https://pkg.go.dev/tailscale.com/tsnet) to join the tailnet as an ephemeral OAuth node. It uses [Tailscale Services](https://tailscale.com/docs/features/tailscale-services) (`tsnet.ListenService`) so multiple replicas serve the same stable address. Every connection triggers a WhoIs lookup to resolve the caller's identity and peer capabilities.
+
+Authorization uses the `rajsingh.info/cap/tailvoy` capability with three dimensions:
+
+| Dimension | Controls | Source |
+|-----------|----------|--------|
+| `listeners` | Which listeners a peer can reach | Listener name from config or Envoy |
+| `routes` | Which paths are accessible (L7 only) | Request path |
+| `hostnames` | Which hostnames are allowed | TLS SNI / HTTP Host header |
+
+**Within a rule**: AND -- all specified dimensions must match.
+**Across rules**: OR -- any matching rule grants access.
+**Omitted dimension**: unrestricted.
+
+## Deployment modes
+
+### Standalone (default)
+
+tailvoy auto-generates Envoy bootstrap config from your listener definitions and manages Envoy as a subprocess. No Envoy YAML needed. Best when you want explicit control over listeners.
 
 ```sh
 tailvoy -config config.yaml
 ```
 
-tailvoy auto-generates Envoy bootstrap config and manages Envoy as a subprocess for L7 listeners. No Envoy YAML needed.
-
 ### Envoy Gateway data plane
 
-Deploy tailvoy as the EG data plane via the `EnvoyProxy` CRD:
+tailvoy replaces the default Envoy image via the `EnvoyProxy` CRD, acting as the data plane for [Envoy Gateway](https://gateway.envoyproxy.io/). EG manages routing via xDS while tailvoy handles Tailscale ingress and policy. Uses discovery mode to auto-create listeners as Gateway resources change.
 
 ```yaml
 apiVersion: gateway.envoyproxy.io/v1alpha1
@@ -611,9 +123,9 @@ spec:
                         name: tailvoy-policy
 ```
 
-EG's generated Envoy args are appended after `--` automatically.
+EG's generated Envoy args are appended after `--` automatically. Requires Envoy Gateway v1.7.0+.
 
-For L7 listeners, apply a SecurityPolicy with gRPC ext_authz:
+For L7 listeners, apply a SecurityPolicy with gRPC ext_authz pointing at tailvoy's authz server:
 
 ```yaml
 apiVersion: gateway.envoyproxy.io/v1alpha1
@@ -633,7 +145,216 @@ spec:
           port: 9001
 ```
 
-> **Requires Envoy Gateway v1.7.0+** for gRPC ext_authz support.
+## Configuration
+
+### Tailscale
+
+```yaml
+tailscale:
+  service: "my-gw"          # VIP service name: svc:my-gw, node hostname: my-gw-tailvoy
+  tags: ["tag:my-gw"]       # ACL tags for the tsnet node
+  serviceTags: ["tag:my-gw"] # ACL tags for the VIP service
+```
+
+Credentials are read from `TS_CLIENT_ID` and `TS_CLIENT_SECRET` environment variables. Your ACL must include:
+
+```jsonc
+{
+    "tagOwners": { "tag:my-gw": ["autogroup:admin"] },
+    "autoApprovers": { "services": { "svc:my-gw": ["tag:my-gw"] } }
+}
+```
+
+### Listeners
+
+Listeners are a named map. The key is the listener name used in ACL cap rules.
+
+| Protocol | Behavior | Config |
+|----------|----------|--------|
+| `http` | L7 via Envoy with ext_authz | `routes` required |
+| `https` | L7 via Envoy, TLS terminated | `routes` + `tls` required |
+| `grpc` | L7 via Envoy with ext_authz | `routes` required, optional `tls` |
+| `tls` | Passthrough, SNI-based routing | `routes` with `hostname` + `backend` |
+| `tcp` | Plain TCP forwarding | `backend` required |
+| `udp` | UDP forwarding (no VIP support) | `backend` required |
+
+L7 protocols (`http`, `https`, `grpc`) route through Envoy for path-level policy. L4 protocols (`tls`, `tcp`, `udp`) are handled directly by tailvoy.
+
+```yaml
+listeners:
+  # L7: HTTP with hostname-based virtual hosting and path routing
+  http:
+    port: 80
+    protocol: http
+    routes:
+      - hostname: app.example.com
+        backend: frontend:3000
+      - hostname: api.example.com
+        paths:
+          /v1/*: api-v1:8080
+          /v2/*: api-v2:8080
+      - backend: fallback:8080          # catch-all
+
+  # L7: gRPC with TLS termination
+  grpc:
+    port: 50051
+    protocol: grpc
+    tls:
+      cert: /certs/cert.pem
+      key: /certs/key.pem
+    routes:
+      - backend: grpc-backend:50051
+
+  # L4: TLS passthrough with SNI routing
+  tls:
+    port: 443
+    protocol: tls
+    routes:
+      - hostname: app.example.com
+        backend: app:8443
+      - hostname: admin.example.com
+        backend: admin:8443
+
+  # L4: plain TCP
+  postgres:
+    port: 5432
+    protocol: tcp
+    backend: db:5432
+
+  # L4: UDP (node IP only, VIP services don't support UDP)
+  dns:
+    port: 53
+    protocol: udp
+    backend: dns:1053
+```
+
+### Discovery mode
+
+Instead of static listeners, tailvoy can poll Envoy's admin API to auto-discover listeners. Mutually exclusive with `listeners`.
+
+```yaml
+discovery:
+  envoyAdmin: "http://127.0.0.1:19000"
+  envoyAddress: "127.0.0.1"
+  pollInterval: "5s"
+  proxyProtocol: v2
+  listenerFilter: "default/eg/.*"      # optional: regex to include only matching names
+```
+
+Discovered listener names follow Envoy Gateway convention: `<namespace>/<gateway>/<listener>`. Use these names in ACL grants and SecurityPolicy `contextExtensions`:
+
+```yaml
+contextExtensions:
+  - name: listener
+    type: Value
+    value: "default/eg/http"
+```
+
+## Authorization
+
+All authorization lives in your Tailscale ACL using `rajsingh.info/cap/tailvoy` grants. The config file never defines who can access what.
+
+### Cap rule schema
+
+```jsonc
+"rajsingh.info/cap/tailvoy": [
+    {
+        "listeners": ["http", "grpc"],       // optional: which listeners
+        "routes": ["/api/*", "/health"],      // optional: which paths (L7 only)
+        "hostnames": ["app.example.com"]      // optional: which hostnames
+    }
+]
+```
+
+An empty rule `[{}]` grants unrestricted access.
+
+### Route patterns
+
+| Pattern | Matches | Does not match |
+|---------|---------|----------------|
+| `/*` | All paths | -- |
+| `/api/*` | `/api/users`, `/api/v1/foo` | `/apiv2` |
+| `/health` | Exactly `/health` | `/health/`, `/healthz` |
+| `/grpc.health.v1.Health/*` | `/grpc.health.v1.Health/Check` | `/grpc.other.Service/Method` |
+
+### Hostname patterns
+
+| Pattern | Matches | Does not match |
+|---------|---------|----------------|
+| `app.example.com` | Exactly `app.example.com` | `other.example.com` |
+| `*.example.com` | `app.example.com`, `sub.app.example.com` | `example.com` |
+
+### Example: multi-team gateway
+
+A single tailvoy instance with scoped access per team:
+
+```yaml
+listeners:
+  http:
+    port: 80
+    protocol: http
+    routes:
+      - backend: web:8080
+  grpc:
+    port: 50051
+    protocol: grpc
+    routes:
+      - backend: grpc:50051
+  postgres:
+    port: 5432
+    protocol: tcp
+    backend: db:5432
+  tls:
+    port: 443
+    protocol: tls
+    routes:
+      - hostname: app.example.com
+        backend: app:8443
+```
+
+```jsonc
+{
+    "grants": [
+        {
+            // Frontend: HTTP + gRPC health only
+            "src": ["tag:frontend"], "dst": ["tag:my-gw"],
+            "app": { "rajsingh.info/cap/tailvoy": [{
+                "listeners": ["http", "grpc"],
+                "routes": ["/api/*", "/grpc.health.v1.Health/*"]
+            }]}
+        },
+        {
+            // DBA: postgres only
+            "src": ["tag:dba"], "dst": ["tag:my-gw"],
+            "app": { "rajsingh.info/cap/tailvoy": [{"listeners": ["postgres"]}] }
+        },
+        {
+            // Engineers: TLS to app.example.com only
+            "src": ["group:engineers"], "dst": ["tag:my-gw"],
+            "app": { "rajsingh.info/cap/tailvoy": [{
+                "listeners": ["tls"],
+                "hostnames": ["app.example.com"]
+            }]}
+        },
+        {
+            // Ops: full access
+            "src": ["group:ops"], "dst": ["tag:my-gw"],
+            "app": { "rajsingh.info/cap/tailvoy": [{}] }
+        }
+    ]
+}
+```
+
+| Caller | HTTP `/api/users` | gRPC `Health/Check` | postgres | TLS `app.example.com` |
+|--------|:---:|:---:|:---:|:---:|
+| tag:frontend | 200 | OK | conn reset | conn reset |
+| tag:dba | conn reset | conn reset | allowed | conn reset |
+| group:engineers | conn reset | conn reset | conn reset | allowed |
+| group:ops | 200 | OK | allowed | allowed |
+
+Multiple matching grants merge via OR -- if alice is in both `tag:frontend` and `group:engineers`, she gets HTTP + gRPC + TLS access.
+
+## Reference
 
 ### Flags
 
@@ -643,72 +364,11 @@ spec:
 | `-authz-addr` | `127.0.0.1:9001` | ext_authz listen address |
 | `-log-level` | `info` | Log level (`debug`/`info`/`warn`/`error`) |
 
-Any arguments after `--` are passed directly to Envoy.
-
-### Docker
-
-```sh
-docker run \
-  -e TS_CLIENT_ID=tskey-client-... \
-  -e TS_CLIENT_SECRET=tskey-client-secret-... \
-  -v $(pwd)/config.yaml:/config.yaml \
-  ghcr.io/rajsinghtech/tailvoy:latest \
-  -config /config.yaml
-```
-
-## Reference
-
-### Listener options (static mode)
-
-| Field | Description |
-|-------|-------------|
-| `port` | Port number to listen on (integer) |
-| `protocol` | `http`, `https`, `grpc`, `tls`, `tcp`, or `udp` |
-| `backend` | Backend address for tcp/udp listeners (e.g. `db:5432`) |
-| `routes` | List of route rules for L7 listeners (http/https/grpc/tls) |
-| `tls.cert` | TLS certificate path (for `https`/`grpc` protocols) |
-| `tls.key` | TLS key path (for `https`/`grpc` protocols) |
-
-### Discovery options
-
-| Field | Required | Description |
-|-------|----------|-------------|
-| `envoyAdmin` | yes | Envoy admin API URL (e.g. `http://127.0.0.1:19000`) |
-| `envoyAddress` | yes | Address to forward traffic to (the Envoy data plane, e.g. `127.0.0.1`) |
-| `pollInterval` | no | How often to poll for changes (default `10s`) |
-| `listenerFilter` | no | Regex to include only matching listener names |
-| `proxyProtocol` | no | Set to `v2` to inject PROXY protocol v2 on all discovered listeners |
-
-Discovery auto-detects L7 listeners by inspecting Envoy's filter chains for `http_connection_manager`. Listener names, ports, and protocols are all derived from the Envoy config -- no manual mapping needed.
-
-### Cap rule fields
-
-| Field | Applies to | Description |
-|-------|-----------|-------------|
-| `listeners` | L4 + L7 | Listener names the peer can access. Omit for all listeners. |
-| `routes` | L7 only | Path patterns (glob-style). Omit for all paths. Ignored at L4. |
-| `hostnames` | L4 (TLS SNI) + L7 (Host header) | Hostname patterns. Omit for all hostnames. |
-
-### Route patterns
-
-| Pattern | Matches | Does not match |
-|---------|---------|----------------|
-| `/*` | All paths | -- |
-| `/api/*` | `/api/`, `/api/users`, `/api/v1/foo` | `/apiv2` |
-| `/health` | Exactly `/health` | `/health/`, `/health/db` |
-| `/admin/*` | `/admin/`, `/admin/settings` | `/administrator` |
-| `/grpc.health.v1.Health/*` | `/grpc.health.v1.Health/Check` | `/grpc.other.Service/Method` |
-
-### Hostname patterns
-
-| Pattern | Matches | Does not match |
-|---------|---------|----------------|
-| `app.example.com` | Exactly `app.example.com` | `other.example.com` |
-| `*.example.com` | `app.example.com`, `deep.sub.example.com` | `example.com` |
+Arguments after `--` are passed directly to Envoy.
 
 ### Identity headers
 
-On allowed L7 requests, tailvoy injects identity headers before the request reaches your backend:
+On allowed L7 requests, tailvoy injects headers before the request reaches the backend:
 
 | Header | Value |
 |--------|-------|
@@ -719,22 +379,25 @@ On allowed L7 requests, tailvoy injects identity headers before the request reac
 
 ### Deny response
 
-Denied L7 requests return HTTP 403 with a JSON body:
+Denied L7 requests return HTTP 403:
 
 ```json
 {"error":"forbidden","message":"access denied by tailvoy policy"}
 ```
+
+Denied L4 connections are closed immediately.
 
 ## Development
 
 ```sh
 make test              # unit tests with race detector
 make lint              # golangci-lint
-make cover             # coverage report
-make integration-test  # docker compose integration tests (requires TS_CLIENT_ID, TS_CLIENT_SECRET)
-make kind-test         # kind cluster integration tests (requires TS_CLIENT_ID, TS_CLIENT_SECRET)
+make integration-test  # docker compose tests (requires TS_CLIENT_ID, TS_CLIENT_SECRET)
+make kind-test         # kind cluster tests with Envoy Gateway
 make docker-build      # build container image
 ```
+
+Build from source: `make build` (requires Go 1.25+).
 
 ## License
 

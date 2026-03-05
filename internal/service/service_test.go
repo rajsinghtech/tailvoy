@@ -45,7 +45,7 @@ func TestManager_Ensure(t *testing.T) {
 	}))
 
 	mgr := New(client, "svc:test-service", []string{"tag:web", "tag:prod"}, slog.Default())
-	if err := mgr.Ensure(context.Background(), []string{"tcp:443", "tcp:80"}); err != nil {
+	if err := mgr.Ensure(context.Background(), []string{"443", "80"}); err != nil {
 		t.Fatalf("Ensure() error: %v", err)
 	}
 

@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"sync"
 
+	proxyproto "github.com/pires/go-proxyproto"
 	"github.com/rajsinghtech/tailvoy/internal/config"
 	"github.com/rajsinghtech/tailvoy/internal/service"
 )
@@ -150,11 +151,15 @@ func (dm *DynamicListenerManager) startListener(parentCtx context.Context, l con
 		}
 
 		// VIP service listener — reachable via the service's virtual IP.
-		svcLn, err := dm.ts.ListenTCPService(dm.svcName, uint16(port))
+		// tsnet's internal proxy injects a PROXY v2 header with the real
+		// client address; wrap with proxyproto.Listener to parse it so
+		// conn.RemoteAddr() returns the original caller's tailscale IP.
+		rawSvcLn, err := dm.ts.ListenTCPService(dm.svcName, uint16(port))
 		if err != nil {
 			cancel()
 			return fmt.Errorf("listen service tcp %s: %w", l.Name, err)
 		}
+		svcLn := &proxyproto.Listener{Listener: rawSvcLn}
 		dm.logger.Info("service listener started", "name", l.Name, "service", dm.svcName, "port", port)
 		go func() {
 			if err := dm.listenerMgr.Serve(lctx, svcLn, &cfg); err != nil {

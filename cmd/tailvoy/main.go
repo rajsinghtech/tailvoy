@@ -12,6 +12,7 @@ import (
 	"sync"
 	"syscall"
 
+	proxyproto "github.com/pires/go-proxyproto"
 	"github.com/rajsinghtech/tailvoy/internal/authz"
 	"github.com/rajsinghtech/tailvoy/internal/config"
 	"github.com/rajsinghtech/tailvoy/internal/discovery"
@@ -30,7 +31,10 @@ type tsnetAdapter struct {
 }
 
 func (a *tsnetAdapter) ListenTCPService(name string, port uint16) (net.Listener, error) {
-	return a.ListenService(name, tsnet.ServiceModeTCP{Port: port})
+	return a.ListenService(name, tsnet.ServiceModeTCP{
+		Port:                 port,
+		PROXYProtocolVersion: 2,
+	})
 }
 
 func main() {
@@ -235,12 +239,18 @@ func run(args []string) error {
 			}
 
 			// VIP service listener — reachable via the service's virtual IP.
-			svcLn, err := ts.ListenService(svcName, tsnet.ServiceModeTCP{Port: uint16(port)})
+			// Wrap with proxyproto.Listener to parse the PROXY v2 header
+			// that tsnet's internal proxy injects with the real client IP.
+			rawSvcLn, err := ts.ListenService(svcName, tsnet.ServiceModeTCP{
+				Port:                 uint16(port),
+				PROXYProtocolVersion: 2,
+			})
 			if err != nil {
 				cancel()
 				wg.Wait()
 				return fmt.Errorf("listen service %s (port %d): %w", l.Name, port, err)
 			}
+			svcLn := &proxyproto.Listener{Listener: rawSvcLn}
 			logger.Info("service listener started", "name", l.Name, "service", svcName, "port", port)
 
 			wg.Add(1)

@@ -34,9 +34,20 @@ func (d *DiscoveryConfig) ParsedPollInterval() time.Duration {
 }
 
 type TailscaleConfig struct {
-	Hostname  string `yaml:"hostname"`
-	AuthKey   string `yaml:"authkey"`
-	Ephemeral bool   `yaml:"ephemeral"`
+	Hostname     string   `yaml:"hostname"`
+	Service      string   `yaml:"service"`
+	Tailnet      string   `yaml:"tailnet"`
+	ClientID     string   `yaml:"clientId"`
+	ClientSecret string   `yaml:"clientSecret"`
+	Tags         []string `yaml:"tags"`
+	ServiceTags  []string `yaml:"serviceTags"`
+}
+
+func (t *TailscaleConfig) ServiceName() string {
+	if t.Service != "" {
+		return t.Service
+	}
+	return "svc:" + t.Hostname
 }
 
 type Listener struct {
@@ -86,6 +97,21 @@ func expandEnvVars(s string) string {
 func (c *Config) validate() error {
 	if c.Tailscale.Hostname == "" {
 		return fmt.Errorf("tailscale.hostname is required")
+	}
+	if c.Tailscale.Tailnet == "" {
+		return fmt.Errorf("tailscale.tailnet is required")
+	}
+	if c.Tailscale.ClientID == "" {
+		return fmt.Errorf("tailscale.clientId is required")
+	}
+	if c.Tailscale.ClientSecret == "" {
+		return fmt.Errorf("tailscale.clientSecret is required")
+	}
+	if len(c.Tailscale.Tags) == 0 {
+		return fmt.Errorf("tailscale.tags is required (node must be tagged for ListenService)")
+	}
+	if len(c.Tailscale.ServiceTags) == 0 {
+		return fmt.Errorf("tailscale.serviceTags is required (VIP service needs at least one tag)")
 	}
 
 	if c.Discovery != nil && len(c.Listeners) > 0 {

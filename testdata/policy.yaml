@@ -1,7 +1,12 @@
 tailscale:
   hostname: "tailvoy-test"
-  authkey: "${TS_AUTHKEY}"
-  ephemeral: true
+  tailnet: "test.ts.net"
+  clientId: "${TS_CLIENT_ID}"
+  clientSecret: "${TS_CLIENT_SECRET}"
+  tags:
+    - "tag:test"
+  serviceTags:
+    - "tag:k8s"
 
 listeners:
   - name: https

@@ -32,10 +32,6 @@ func (f *fakeTSNet) Listen(network, addr string) (net.Listener, error) {
 	return ln, nil
 }
 
-func (f *fakeTSNet) ListenPacket(network, addr string) (net.PacketConn, error) {
-	return net.ListenPacket("udp", "127.0.0.1:0")
-}
-
 func (f *fakeTSNet) ListenTCPService(name string, port uint16) (net.Listener, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -56,9 +52,8 @@ func newTestDynMgr() (*DynamicListenerManager, *fakeTSNet) {
 	// Use a nil local client resolver — we won't actually resolve identities in these tests.
 	var resolver *identity.Resolver
 	l4 := NewL4Proxy(testDynLogger())
-	udp := NewUDPProxy(testDynLogger())
 	lm := NewListenerManager(engine, resolver, l4, testDynLogger())
-	return NewDynamicListenerManager(ts, lm, udp, nil, "svc:test", testDynLogger(), "100.64.0.1"), ts
+	return NewDynamicListenerManager(ts, lm, nil, "svc:test", testDynLogger()), ts
 }
 
 func TestReconcile_AddNewListeners(t *testing.T) {

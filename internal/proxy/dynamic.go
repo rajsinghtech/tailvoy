@@ -16,7 +16,6 @@ import (
 // TSNetServer abstracts the tsnet.Server methods used by DynamicListenerManager.
 type TSNetServer interface {
 	Listen(network, addr string) (net.Listener, error)
-	ListenPacket(network, addr string) (net.PacketConn, error)
 	ListenTCPService(name string, port uint16) (net.Listener, error)
 }
 
@@ -25,11 +24,9 @@ type TSNetServer interface {
 type DynamicListenerManager struct {
 	ts          TSNetServer
 	listenerMgr *ListenerManager
-	udpProxy    *UDPProxy
 	svcMgr      *service.Manager // may be nil in tests
 	svcName     string
 	logger      *slog.Logger
-	tsIP        string // tailscale IPv4 for UDP listeners
 
 	mu     sync.Mutex
 	active map[string]*dynamicListener
@@ -41,15 +38,13 @@ type dynamicListener struct {
 }
 
 // NewDynamicListenerManager creates a manager that can start/stop listeners dynamically.
-func NewDynamicListenerManager(ts TSNetServer, lm *ListenerManager, udp *UDPProxy, svcMgr *service.Manager, svcName string, logger *slog.Logger, tsIP string) *DynamicListenerManager {
+func NewDynamicListenerManager(ts TSNetServer, lm *ListenerManager, svcMgr *service.Manager, svcName string, logger *slog.Logger) *DynamicListenerManager {
 	return &DynamicListenerManager{
 		ts:          ts,
 		listenerMgr: lm,
-		udpProxy:    udp,
 		svcMgr:      svcMgr,
 		svcName:     svcName,
 		logger:      logger,
-		tsIP:        tsIP,
 		active:      make(map[string]*dynamicListener),
 	}
 }
@@ -63,7 +58,7 @@ func (dm *DynamicListenerManager) Reconcile(ctx context.Context, desired []confi
 	var tcpDesired []config.Listener
 	for _, l := range desired {
 		if l.Protocol == "udp" {
-			dm.logger.Warn("UDP listener has no VIP service support, node IP only", "listener", l.Name)
+			dm.logger.Warn("UDP listener skipped, not supported in discovery mode", "listener", l.Name)
 			continue
 		}
 		tcpDesired = append(tcpDesired, l)
@@ -120,65 +115,41 @@ func (dm *DynamicListenerManager) Reconcile(ctx context.Context, desired []confi
 
 func (dm *DynamicListenerManager) startListener(parentCtx context.Context, l config.Listener) error {
 	lctx, cancel := context.WithCancel(parentCtx)
-	cfg := l // copy
 
-	switch l.Protocol {
-	case "udp":
-		if dm.tsIP == "" {
-			cancel()
-			return fmt.Errorf("no tailscale IPv4 for UDP listener %s", l.Name)
+	port, err := strconv.ParseUint(l.Port(), 10, 16)
+	if err != nil {
+		cancel()
+		return fmt.Errorf("invalid port for %s: %w", l.Name, err)
+	}
+
+	// VIP service listener — reachable via the service's virtual IP.
+	// tsnet's internal proxy injects a PROXY v2 header with the real
+	// client address; wrap with proxyproto.Listener to parse it so
+	// conn.RemoteAddr() returns the original caller's tailscale IP.
+	rawSvcLn, err := dm.ts.ListenTCPService(dm.svcName, uint16(port))
+	if err != nil {
+		cancel()
+		return fmt.Errorf("listen service tcp %s: %w", l.Name, err)
+	}
+	svcLn := &proxyproto.Listener{Listener: rawSvcLn}
+	dm.logger.Info("service listener started", "name", l.Name, "service", dm.svcName, "port", port)
+	go func() {
+		if err := dm.listenerMgr.Serve(lctx, svcLn, &l); err != nil {
+			dm.logger.Debug("service listener ended", "name", l.Name, "err", err)
 		}
-		pc, err := dm.ts.ListenPacket("udp", fmt.Sprintf("%s:%s", dm.tsIP, l.Port()))
-		if err != nil {
-			cancel()
-			return fmt.Errorf("listen udp %s: %w", l.Name, err)
-		}
-		dm.logger.Info("dynamic udp listener started", "name", l.Name, "addr", l.Listen)
+	}()
+
+	// Node IP listener — reachable via the node's direct tailscale IP.
+	nodeLn, err := dm.ts.Listen("tcp", ":"+l.Port())
+	if err != nil {
+		dm.logger.Warn("node listener failed, VIP-only", "name", l.Name, "port", port, "err", err)
+	} else {
+		dm.logger.Info("node listener started", "name", l.Name, "port", port)
 		go func() {
-			<-lctx.Done()
-			_ = pc.Close()
-		}()
-		go func() {
-			if err := dm.udpProxy.Serve(lctx, pc, cfg.Forward, dm.listenerMgr.resolver, dm.listenerMgr.engine, cfg.Name); err != nil {
-				dm.logger.Debug("dynamic udp listener ended", "name", cfg.Name, "err", err)
+			if err := dm.listenerMgr.Serve(lctx, nodeLn, &l); err != nil {
+				dm.logger.Debug("node listener ended", "name", l.Name, "err", err)
 			}
 		}()
-	default: // tcp
-		port, err := strconv.ParseUint(l.Port(), 10, 16)
-		if err != nil {
-			cancel()
-			return fmt.Errorf("invalid port for %s: %w", l.Name, err)
-		}
-
-		// VIP service listener — reachable via the service's virtual IP.
-		// tsnet's internal proxy injects a PROXY v2 header with the real
-		// client address; wrap with proxyproto.Listener to parse it so
-		// conn.RemoteAddr() returns the original caller's tailscale IP.
-		rawSvcLn, err := dm.ts.ListenTCPService(dm.svcName, uint16(port))
-		if err != nil {
-			cancel()
-			return fmt.Errorf("listen service tcp %s: %w", l.Name, err)
-		}
-		svcLn := &proxyproto.Listener{Listener: rawSvcLn}
-		dm.logger.Info("service listener started", "name", l.Name, "service", dm.svcName, "port", port)
-		go func() {
-			if err := dm.listenerMgr.Serve(lctx, svcLn, &cfg); err != nil {
-				dm.logger.Debug("service listener ended", "name", cfg.Name, "err", err)
-			}
-		}()
-
-		// Node IP listener — reachable via the node's direct tailscale IP.
-		nodeLn, err := dm.ts.Listen("tcp", ":"+l.Port())
-		if err != nil {
-			dm.logger.Warn("node listener failed, VIP-only", "name", l.Name, "port", port, "err", err)
-		} else {
-			dm.logger.Info("node listener started", "name", l.Name, "port", port)
-			go func() {
-				if err := dm.listenerMgr.Serve(lctx, nodeLn, &cfg); err != nil {
-					dm.logger.Debug("node listener ended", "name", cfg.Name, "err", err)
-				}
-			}()
-		}
 	}
 
 	dm.active[l.Name] = &dynamicListener{cfg: l, cancel: cancel}

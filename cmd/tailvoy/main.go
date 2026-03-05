@@ -189,7 +189,7 @@ func run(args []string) error {
 			wg.Wait()
 			return fmt.Errorf("discovery setup: %w", err)
 		}
-		dynMgr := proxy.NewDynamicListenerManager(&tsnetAdapter{ts}, listenerMgr, udpProxy, svcMgr, cfg.Tailscale.ServiceName(), logger, tsIP)
+		dynMgr := proxy.NewDynamicListenerManager(&tsnetAdapter{ts}, listenerMgr, svcMgr, cfg.Tailscale.ServiceName(), logger)
 
 		wg.Add(1)
 		go func() {

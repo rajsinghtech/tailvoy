@@ -165,7 +165,7 @@ func (d *Discoverer) parse(body []byte) ([]config.Listener, error) {
 			protocol = "udp"
 		}
 
-		allChains := lc.FilterChains
+		allChains := append([]filterChain(nil), lc.FilterChains...)
 		if lc.DefaultFilterChain != nil {
 			allChains = append(allChains, *lc.DefaultFilterChain)
 		}

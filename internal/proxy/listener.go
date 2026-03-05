@@ -93,9 +93,11 @@ func (lm *ListenerManager) handleConn(ctx context.Context, conn net.Conn, listen
 		var peekErr error
 		sni, reader, peekErr = PeekSNI(conn)
 		if peekErr != nil {
-			lm.logger.Debug("SNI peek failed",
+			lm.logger.Debug("SNI peek error",
 				"listener", listenerCfg.Name, "remote", remoteAddr, "err", peekErr)
-			return
+			if sni == "" {
+				return
+			}
 		}
 		conn = &readerConn{Conn: conn, reader: reader}
 	}

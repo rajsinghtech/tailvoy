@@ -17,18 +17,21 @@ const dialTimeout = 10 * time.Second
 // L4Proxy forwards raw TCP connections with optional PROXY protocol v2 headers.
 type L4Proxy struct {
 	logger *slog.Logger
+	dialer net.Dialer
 }
 
 func NewL4Proxy(logger *slog.Logger) *L4Proxy {
-	return &L4Proxy{logger: logger}
+	return &L4Proxy{
+		logger: logger,
+		dialer: net.Dialer{Timeout: dialTimeout},
+	}
 }
 
 // Forward dials backendAddr, optionally writes a PROXY protocol v2 header
 // conveying srcAddr, then bidirectionally copies data between client and the
 // backend until one side closes or ctx is cancelled.
 func (p *L4Proxy) Forward(ctx context.Context, client net.Conn, backendAddr string, srcAddr net.Addr, useProxyProto bool) error {
-	dialer := net.Dialer{Timeout: dialTimeout}
-	backend, err := dialer.DialContext(ctx, "tcp", backendAddr)
+	backend, err := p.dialer.DialContext(ctx, "tcp", backendAddr)
 	if err != nil {
 		return fmt.Errorf("dial backend %s: %w", backendAddr, err)
 	}

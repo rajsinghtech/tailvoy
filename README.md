@@ -688,7 +688,7 @@ On allowed L7 requests, tailvoy injects identity headers before the request reac
 |--------|-------|
 | `X-Tailscale-User` | Tailscale login (e.g. `alice@example.com`) |
 | `X-Tailscale-Node` | Node FQDN (e.g. `alices-laptop.tailnet.ts.net`) |
-| `X-Tailscale-Ip` | Tailscale IP (e.g. `100.64.0.1`) |
+| `X-Tailscale-IP` | Tailscale IP (e.g. `100.64.0.1`) |
 | `X-Tailscale-Tags` | Comma-separated ACL tags |
 
 ### Deny response

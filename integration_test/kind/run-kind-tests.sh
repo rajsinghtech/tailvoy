@@ -14,6 +14,11 @@ TESTS=()
 cleanup() {
     echo ""
     echo "=== Cleanup ==="
+    # In CI, skip cleanup so the workflow can collect logs before the cluster is deleted.
+    if [ "${CI:-}" = "true" ]; then
+        echo "CI detected, skipping kind cluster cleanup (workflow handles it)"
+        return
+    fi
     kind delete cluster --name "$CLUSTER_NAME" 2>/dev/null || true
 }
 trap cleanup EXIT

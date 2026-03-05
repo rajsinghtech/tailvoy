@@ -20,7 +20,6 @@ jobs:
     timeout-minutes: 5
     outputs:
       tailnet_name: ${{ steps.create.outputs.tailnet_name }}
-      ts_authkey: ${{ steps.authkey.outputs.ts_authkey }}
       ts_client_id: ${{ steps.create.outputs.oauth_client_id }}
       ts_client_secret: ${{ steps.create.outputs.oauth_client_secret }}
       oauth_client_id: ${{ steps.create.outputs.oauth_client_id }}
@@ -88,16 +87,6 @@ jobs:
             "${{ steps.create.outputs.tailnet_name }}" \
             ./integration_test/scripts/test-acl.json
 
-      - name: Create auth key
-        id: authkey
-        run: |
-          AUTHKEY_JSON=$(./integration_test/scripts/create-auth-key.sh \
-            "${{ steps.tailnet_token.outputs.tailnet_token }}" \
-            "${{ steps.create.outputs.tailnet_name }}" \
-            "user" true true true)
-          TS_AUTHKEY=$(echo "$AUTHKEY_JSON" | jq -r '.key')
-          echo "ts_authkey=$TS_AUTHKEY" >> "$GITHUB_OUTPUT"
-
   kind-test:
     needs: setup-tailnet
     runs-on: ubuntu-latest
@@ -131,7 +120,9 @@ jobs:
       - name: Install Tailscale
         uses: tailscale/github-action@v4
         with:
-          authkey: ${{ needs.setup-tailnet.outputs.ts_authkey }}
+          oauth-client-id: ${{ needs.setup-tailnet.outputs.oauth_client_id }}
+          oauth-secret: ${{ needs.setup-tailnet.outputs.oauth_client_secret }}
+          tags: tag:user
 
       - name: Run kind integration tests
         env:
@@ -155,6 +146,10 @@ jobs:
             eg-controller.log
           retention-days: 7
 
+      - name: Delete kind cluster
+        if: always()
+        run: kind delete cluster --name tailvoy-kind-test 2>/dev/null || true
+
   docker-test:
     needs: setup-tailnet
     runs-on: ubuntu-latest
@@ -166,7 +161,9 @@ jobs:
       - name: Install Tailscale
         uses: tailscale/github-action@v4
         with:
-          authkey: ${{ needs.setup-tailnet.outputs.ts_authkey }}
+          oauth-client-id: ${{ needs.setup-tailnet.outputs.oauth_client_id }}
+          oauth-secret: ${{ needs.setup-tailnet.outputs.oauth_client_secret }}
+          tags: tag:user
 
       - name: Install ncat
         run: sudo apt-get install -y ncat

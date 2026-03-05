@@ -90,7 +90,7 @@ func Parse(data []byte) (*Config, error) {
 // expandEnvVars replaces ${VAR} references with their environment variable values.
 func expandEnvVars(s string) string {
 	return envVarRe.ReplaceAllStringFunc(s, func(match string) string {
-		name := envVarRe.FindStringSubmatch(match)[1]
+		name := match[2 : len(match)-1] // trim ${ and }
 		return os.Getenv(name)
 	})
 }

@@ -7,8 +7,13 @@ data:
   policy.yaml: |
     tailscale:
       hostname: "tailvoy-kind-test"
-      authkey: "${TS_AUTHKEY}"
-      ephemeral: true
+      tailnet: "${TS_TAILNET}"
+      clientId: "${TS_CLIENT_ID}"
+      clientSecret: "${TS_CLIENT_SECRET}"
+      tags:
+        - "tag:kind"
+      serviceTags:
+        - "tag:kind"
     discovery:
       envoyAdmin: "http://127.0.0.1:19000"
       envoyAddress: "127.0.0.1"

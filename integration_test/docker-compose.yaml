@@ -10,7 +10,9 @@ services:
       context: ..
       dockerfile: Dockerfile
     environment:
-      - TS_AUTHKEY=${TS_AUTHKEY}
+      - TS_CLIENT_ID=${TS_CLIENT_ID}
+      - TS_CLIENT_SECRET=${TS_CLIENT_SECRET}
+      - TS_TAILNET=${TS_TAILNET:--}
     command:
       - "--policy"
       - "/policy.yaml"

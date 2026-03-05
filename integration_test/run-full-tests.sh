@@ -61,14 +61,17 @@ else
 fi
 
 # --- Load env ---
-if [ -z "${TS_AUTHKEY:-}" ]; then
+if [ -z "${TS_CLIENT_ID:-}" ] || [ -z "${TS_CLIENT_SECRET:-}" ]; then
     if [ -f "$SCRIPT_DIR/.env" ]; then
         export $(grep -v '^#' "$SCRIPT_DIR/.env" | xargs)
     else
-        echo "FATAL: TS_AUTHKEY not set"
+        echo "FATAL: TS_CLIENT_ID/TS_CLIENT_SECRET not set and no .env file found"
         exit 1
     fi
 fi
+if [ -z "${TS_CLIENT_ID:-}" ]; then echo "FATAL: TS_CLIENT_ID is empty"; exit 1; fi
+if [ -z "${TS_CLIENT_SECRET:-}" ]; then echo "FATAL: TS_CLIENT_SECRET is empty"; exit 1; fi
+export TS_TAILNET="${TS_TAILNET:--}"
 
 # --- Build and start ---
 echo "=== Building Docker images ==="

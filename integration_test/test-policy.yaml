@@ -1,7 +1,12 @@
 tailscale:
   hostname: "tailvoy-integration-test"
-  authkey: "${TS_AUTHKEY}"
-  ephemeral: true
+  tailnet: "${TS_TAILNET}"
+  clientId: "${TS_CLIENT_ID}"
+  clientSecret: "${TS_CLIENT_SECRET}"
+  tags:
+    - "tag:integration"
+  serviceTags:
+    - "tag:integration"
 
 listeners:
   - name: web

@@ -61,7 +61,19 @@ fi
 
 # --- Start tailvoy (L4-only mode) ---
 echo "=== Starting tailvoy ==="
-export TS_AUTHKEY="${TS_AUTHKEY:?TS_AUTHKEY must be set}"
+if [ -z "${TS_CLIENT_ID:-}" ] || [ -z "${TS_CLIENT_SECRET:-}" ]; then
+    if [ -f "$SCRIPT_DIR/.env" ]; then
+        export $(grep -v '^#' "$SCRIPT_DIR/.env" | xargs)
+    elif [ -f "$PROJECT_ROOT/.env" ]; then
+        export $(grep -v '^#' "$PROJECT_ROOT/.env" | xargs)
+    else
+        echo "FATAL: TS_CLIENT_ID/TS_CLIENT_SECRET not set and no .env file found"
+        exit 1
+    fi
+fi
+if [ -z "${TS_CLIENT_ID:-}" ]; then echo "FATAL: TS_CLIENT_ID is empty"; exit 1; fi
+if [ -z "${TS_CLIENT_SECRET:-}" ]; then echo "FATAL: TS_CLIENT_SECRET is empty"; exit 1; fi
+export TS_TAILNET="${TS_TAILNET:--}"
 "$SCRIPT_DIR/tailvoy" --policy "$SCRIPT_DIR/l4-test-policy.yaml" --log-level debug 2>&1 &
 TAILVOY_PID=$!
 

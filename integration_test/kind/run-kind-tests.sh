@@ -92,21 +92,26 @@ if command -v grpc-health-probe &>/dev/null; then
 fi
 echo "All prerequisites found (using $NC_CMD for TCP/UDP, grpcurl=$HAS_GRPCURL, grpc-health-probe=$HAS_HEALTHPROBE)"
 
-# --- Load TS_AUTHKEY ---
-if [ -z "${TS_AUTHKEY:-}" ]; then
+# --- Load OAuth credentials ---
+if [ -z "${TS_CLIENT_ID:-}" ] || [ -z "${TS_CLIENT_SECRET:-}" ]; then
     if [ -f "$REPO_ROOT/.env" ]; then
         export $(grep -v '^#' "$REPO_ROOT/.env" | xargs)
     elif [ -f "$SCRIPT_DIR/../.env" ]; then
         export $(grep -v '^#' "$SCRIPT_DIR/../.env" | xargs)
     else
-        echo "FATAL: TS_AUTHKEY not set and no .env file found"
+        echo "FATAL: TS_CLIENT_ID/TS_CLIENT_SECRET not set and no .env file found"
         exit 1
     fi
 fi
-if [ -z "${TS_AUTHKEY:-}" ]; then
-    echo "FATAL: TS_AUTHKEY is empty"
+if [ -z "${TS_CLIENT_ID:-}" ]; then
+    echo "FATAL: TS_CLIENT_ID is empty"
     exit 1
 fi
+if [ -z "${TS_CLIENT_SECRET:-}" ]; then
+    echo "FATAL: TS_CLIENT_SECRET is empty"
+    exit 1
+fi
+TS_TAILNET="${TS_TAILNET:--}"
 
 # --- Create kind cluster ---
 echo "=== Creating kind cluster ==="
@@ -145,11 +150,12 @@ kubectl wait --namespace envoy-gateway-system \
     deployment/envoy-gateway \
     --for=condition=available --timeout=120s
 
-# --- Create TS_AUTHKEY secret ---
-echo "=== Creating TS_AUTHKEY secret ==="
-kubectl create secret generic tailvoy-authkey \
+# --- Create OAuth secret ---
+echo "=== Creating OAuth secret ==="
+kubectl create secret generic tailvoy-oauth \
     -n envoy-gateway-system \
-    --from-literal=TS_AUTHKEY="$TS_AUTHKEY"
+    --from-literal=TS_CLIENT_ID="$TS_CLIENT_ID" \
+    --from-literal=TS_CLIENT_SECRET="$TS_CLIENT_SECRET"
 
 # --- Apply tailvoy config + authz service + ReferenceGrant ---
 echo "=== Deploying tailvoy config ==="

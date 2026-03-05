@@ -28,11 +28,18 @@ spec:
                         - debug
                         - --
                       env:
-                        - name: TS_AUTHKEY
+                        - name: TS_CLIENT_ID
                           valueFrom:
                             secretKeyRef:
-                              name: tailvoy-authkey
-                              key: TS_AUTHKEY
+                              name: tailvoy-oauth
+                              key: TS_CLIENT_ID
+                        - name: TS_CLIENT_SECRET
+                          valueFrom:
+                            secretKeyRef:
+                              name: tailvoy-oauth
+                              key: TS_CLIENT_SECRET
+                        - name: TS_TAILNET
+                          value: "-"
                       ports:
                         - containerPort: 9001
                           name: authz

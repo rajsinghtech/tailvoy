@@ -221,18 +221,37 @@ done
 
 # --- Wait for tailnet join ---
 echo "=== Waiting for tailnet join ==="
-IP=""
+NODE_IP=""
 for i in $(seq 1 90); do
-    IP=$(tailscale status --json 2>/dev/null \
+    NODE_IP=$(tailscale status --json 2>/dev/null \
         | jq -r ".Peer[] | select(.HostName == \"$TAILVOY_HOSTNAME\" and .Online == true) | .TailscaleIPs[0]" 2>/dev/null || true)
+    if [ -n "$NODE_IP" ] && [ "$NODE_IP" != "null" ]; then
+        echo "$TAILVOY_HOSTNAME joined as $NODE_IP"
+        break
+    fi
+    sleep 2
+done
+if [ -z "$NODE_IP" ] || [ "$NODE_IP" = "null" ]; then
+    echo "FATAL: tailvoy did not join tailnet"
+    dump_logs
+    exit 1
+fi
+
+# --- Wait for VIP service ---
+echo "=== Waiting for VIP service ==="
+IP=""
+SVC_NAME="svc-tailvoy-kind-test"
+for i in $(seq 1 30); do
+    IP=$(tailscale ip "$SVC_NAME" 2>/dev/null | head -1 || true)
     if [ -n "$IP" ] && [ "$IP" != "null" ]; then
-        echo "$TAILVOY_HOSTNAME joined as $IP"
+        echo "VIP service $SVC_NAME at $IP"
         break
     fi
     sleep 2
 done
 if [ -z "$IP" ] || [ "$IP" = "null" ]; then
-    echo "FATAL: tailvoy did not join tailnet"
+    echo "FATAL: VIP service $SVC_NAME not found"
+    tailscale status 2>/dev/null || true
     dump_logs
     exit 1
 fi

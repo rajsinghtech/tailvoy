@@ -79,20 +79,40 @@ docker compose -f "$COMPOSE_FILE" build 2>&1 | tail -5
 echo "=== Starting stack ==="
 docker compose -f "$COMPOSE_FILE" up -d 2>&1
 
-# --- Wait for tailnet ---
+# --- Wait for tailnet join (node) ---
 echo "=== Waiting for tailnet join ==="
-IP=""
+NODE_IP=""
 for i in $(seq 1 60); do
-    IP=$(tailscale status --json 2>/dev/null \
+    NODE_IP=$(tailscale status --json 2>/dev/null \
         | jq -r '.Peer[] | select(.HostName == "tailvoy-docker-test-tailvoy") | .TailscaleIPs[0]' 2>/dev/null || true)
+    if [ -n "$NODE_IP" ] && [ "$NODE_IP" != "null" ]; then
+        echo "tailvoy-docker-test-tailvoy joined as $NODE_IP"
+        break
+    fi
+    sleep 2
+done
+if [ -z "$NODE_IP" ] || [ "$NODE_IP" = "null" ]; then
+    echo "FATAL: tailvoy did not join"
+    docker compose -f "$COMPOSE_FILE" logs tailvoy 2>&1 | tail -30
+    exit 1
+fi
+
+# --- Wait for VIP service ---
+echo "=== Waiting for VIP service ==="
+IP=""
+SVC_NAME="svc-tailvoy-docker-test"
+for i in $(seq 1 30); do
+    # Try resolving the VIP service via tailscale ip (MagicDNS)
+    IP=$(tailscale ip "$SVC_NAME" 2>/dev/null | head -1 || true)
     if [ -n "$IP" ] && [ "$IP" != "null" ]; then
-        echo "tailvoy-docker-test-tailvoy joined as $IP"
+        echo "VIP service $SVC_NAME at $IP"
         break
     fi
     sleep 2
 done
 if [ -z "$IP" ] || [ "$IP" = "null" ]; then
-    echo "FATAL: tailvoy did not join"
+    echo "FATAL: VIP service $SVC_NAME not found"
+    tailscale status 2>/dev/null || true
     docker compose -f "$COMPOSE_FILE" logs tailvoy 2>&1 | tail -30
     exit 1
 fi

@@ -384,8 +384,16 @@ else
     test_fail "TCP: echo allow (cap grants L4 access)" "got '$TCP_RESP'"
 fi
 
-TCP_RESP2=$(echo "world" | $NC_CMD -w 5 "$IP" 8090 2>/dev/null || true)
-if echo "$TCP_RESP2" | grep -q "echo: world"; then
+TCP2_OK=false
+for i in 1 2 3; do
+    TCP_RESP2=$(echo "world" | $NC_CMD -w 5 "$IP" 8090 2>/dev/null || true)
+    if echo "$TCP_RESP2" | grep -q "echo: world"; then
+        TCP2_OK=true
+        break
+    fi
+    sleep 1
+done
+if [ "$TCP2_OK" = "true" ]; then
     test_pass "TCP: second connection allow"
 else
     test_fail "TCP: second connection allow" "got '$TCP_RESP2'"

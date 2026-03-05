@@ -65,18 +65,31 @@ fi
 # --- Wait for VIP service ---
 echo "=== Waiting for VIP service ==="
 TAILVOY_IP=""
-SVC_NAME="svc-tailvoy-l7-test"
+SVC_NAME="svc:tailvoy-l7-test"
+TS_TOKEN=$(curl -sf -X POST \
+    -d "client_id=$TS_CLIENT_ID" \
+    -d "client_secret=$TS_CLIENT_SECRET" \
+    -d "grant_type=client_credentials" \
+    "https://api.tailscale.com/api/v2/oauth/token" | jq -r '.access_token')
+if [ -z "$TS_TOKEN" ] || [ "$TS_TOKEN" = "null" ]; then
+    echo "FATAL: Failed to get Tailscale API token"
+    exit 1
+fi
 for i in $(seq 1 30); do
-    TAILVOY_IP=$(tailscale ip "$SVC_NAME" 2>/dev/null | head -1 || true)
+    TAILVOY_IP=$(curl -sf -H "Authorization: Bearer $TS_TOKEN" \
+        "https://api.tailscale.com/api/v2/tailnet/-/vip-services/${SVC_NAME}" \
+        | jq -r '[.addrs[] | select(contains(":") | not)] | .[0]' 2>/dev/null || true)
     if [ -n "$TAILVOY_IP" ] && [ "$TAILVOY_IP" != "null" ]; then
         echo "VIP service $SVC_NAME at $TAILVOY_IP"
         break
     fi
+    echo "  waiting for VIP service $SVC_NAME (attempt $i)..."
     sleep 2
 done
 if [ -z "$TAILVOY_IP" ] || [ "$TAILVOY_IP" = "null" ]; then
     echo "FATAL: VIP service $SVC_NAME not found"
-    tailscale status 2>/dev/null || true
+    curl -sf -H "Authorization: Bearer $TS_TOKEN" \
+        "https://api.tailscale.com/api/v2/tailnet/-/vip-services/${SVC_NAME}" 2>&1 || true
     docker compose -f "$SCRIPT_DIR/docker-compose.yaml" logs tailvoy 2>&1 | tail -20
     exit 1
 fi

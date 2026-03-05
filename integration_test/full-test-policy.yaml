@@ -3,9 +3,9 @@ tailscale:
   clientId: "${TS_CLIENT_ID}"
   clientSecret: "${TS_CLIENT_SECRET}"
   tags:
-    - "tag:integration"
+    - "tag:docker"
   serviceTags:
-    - "tag:integration"
+    - "tag:docker"
 
 listeners:
   - name: http

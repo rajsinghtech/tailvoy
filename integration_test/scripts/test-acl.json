@@ -1,11 +1,13 @@
 {
   "tagOwners": {
-    "tag:kind": [],
-    "tag:integration": []
+    "tag:user": [],
+    "tag:docker": [],
+    "tag:kind": []
   },
   "autoApprovers": {
     "services": {
-      "svc:*": ["tag:kind", "tag:integration"]
+      "svc:docker": ["tag:docker"],
+      "svc:kind": ["tag:kind"]
     }
   },
   "grants": [
@@ -15,24 +17,24 @@
       "ip": ["*"]
     },
     {
-      "src": ["tag:kind"],
-      "dst": ["tag:kind"],
+      "src": ["tag:user"],
+      "dst": ["tag:docker"],
       "app": {
         "rajsingh.info/cap/tailvoy": [
-          {"listeners": ["http", "default/eg/http"], "routes": ["/public/*", "/health", "/api/*", "/admin/*"]},
-          {"listeners": ["grpc", "default/eg/grpc"], "routes": ["/grpc.health.v1.Health/*"]},
-          {"listeners": ["tcp", "udp", "tls", "default/eg/tcp", "default/eg/udp", "default/eg/tls"]}
+          {"listeners": ["http"], "routes": ["/public/*", "/health", "/api/*"]},
+          {"listeners": ["tcp"]}
         ]
       }
     },
     {
-      "src": ["tag:integration"],
-      "dst": ["tag:integration"],
+      "src": ["tag:user"],
+      "dst": ["tag:kind"],
       "app": {
         "rajsingh.info/cap/tailvoy": [
-          {"listeners": ["http", "https"], "routes": ["/public/*", "/health", "/api/*", "/admin/*"]},
-          {"listeners": ["grpc"], "routes": ["/grpc.health.v1.Health/*"]},
-          {"listeners": ["tcp", "udp", "tls"]}
+          {"listeners": ["http", "default/eg/http"], "hostnames": ["public.tailvoy.test"], "routes": ["/api/*", "/health"]},
+          {"listeners": ["http", "default/eg/http"], "routes": ["/public/*"]},
+          {"listeners": ["grpc", "default/eg/grpc"], "routes": ["/grpc.health.v1.Health/*"]},
+          {"listeners": ["tcp", "tls", "default/eg/tcp", "default/eg/tls"]}
         ]
       }
     }

@@ -63,7 +63,7 @@ func (dm *DynamicListenerManager) Reconcile(ctx context.Context, desired []confi
 	var tcpDesired []config.Listener
 	for _, l := range desired {
 		if l.Protocol == "udp" {
-			dm.logger.Warn("UDP listeners not supported with VIP services, skipping", "name", l.Name)
+			dm.logger.Warn("UDP listener has no VIP service support, node IP only", "listener", l.Name)
 			continue
 		}
 		tcpDesired = append(tcpDesired, l)

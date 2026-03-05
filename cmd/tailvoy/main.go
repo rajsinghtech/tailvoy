@@ -212,6 +212,7 @@ func run(args []string) error {
 		for i := range cfg.Listeners {
 			l := &cfg.Listeners[i]
 			if l.Protocol == "udp" {
+				logger.Warn("UDP listener has no VIP service support, node IP only", "listener", l.Name)
 				udpListeners = append(udpListeners, l)
 				continue
 			}
@@ -280,7 +281,6 @@ func run(args []string) error {
 		// Start UDP listeners on the node IP (VIP services don't support UDP).
 		if tsIP != "" {
 			for _, l := range udpListeners {
-				logger.Warn("UDP listener has no VIP service support, node IP only", "listener", l.Name)
 				l := l
 				pc, err := ts.ListenPacket("udp", tsIP+":"+l.Port())
 				if err != nil {

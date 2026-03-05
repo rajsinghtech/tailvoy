@@ -283,7 +283,7 @@ assert_http "HTTP: GET /api/data allow" "http://$IP:8080/api/data" "200"
 assert_http "HTTP: GET /api/v1/users allow" "http://$IP:8080/api/v1/users" "200"
 
 # Allow: prefix match /admin/*
-assert_http "HTTP: GET /admin/settings allow" "http://$IP:8080/admin/settings" "200"
+assert_http "HTTP: GET /admin/settings deny (not in caps)" "http://$IP:8080/admin/settings" "403"
 
 # Deny: root path not in cap routes
 assert_http "HTTP: GET / deny" "http://$IP:8080/" "403"
@@ -317,6 +317,40 @@ else
 fi
 if [ -n "$NODE_HDR" ] && [ "$NODE_HDR" != "null" ]; then test_pass "HTTP: x-tailscale-node present"; else test_fail "HTTP: x-tailscale-node present" "empty"; fi
 if [ -n "$IP_HDR" ] && [ "$IP_HDR" != "null" ]; then test_pass "HTTP: x-tailscale-ip present"; else test_fail "HTTP: x-tailscale-ip present" "empty"; fi
+
+# =====================================================
+# HOSTNAME DIMENSION TESTS
+# =====================================================
+echo ""
+echo "========================================"
+echo "  HOSTNAME DIMENSION TESTS"
+echo "========================================"
+
+# Cap rule: {"listeners": ["http", "default/eg/http"], "hostnames": ["public.tailvoy.test"], "routes": ["/api/*", "/health"]}
+# /api/* on public.tailvoy.test -> ALLOW
+assert_http "Hostname: GET /api/data Host:public.tailvoy.test allow" \
+    "http://$IP:8080/api/data" "200" \
+    -H "Host: public.tailvoy.test"
+
+# /health on public.tailvoy.test -> ALLOW
+assert_http "Hostname: GET /health Host:public.tailvoy.test allow" \
+    "http://$IP:8080/health" "200" \
+    -H "Host: public.tailvoy.test"
+
+# /api/* on admin.tailvoy.test -> DENY (hostname not in caps)
+assert_http "Hostname: GET /api/data Host:admin.tailvoy.test deny" \
+    "http://$IP:8080/api/data" "403" \
+    -H "Host: admin.tailvoy.test"
+
+# /admin/* on public.tailvoy.test -> DENY (route not in caps)
+assert_http "Hostname: GET /admin/x Host:public.tailvoy.test deny" \
+    "http://$IP:8080/admin/x" "403" \
+    -H "Host: public.tailvoy.test"
+
+# /public/* on admin.tailvoy.test -> ALLOW (second rule has no hostname restriction)
+assert_http "Hostname: GET /public/hello Host:admin.tailvoy.test allow" \
+    "http://$IP:8080/public/hello" "200" \
+    -H "Host: admin.tailvoy.test"
 
 # =====================================================
 # TCPRoute TESTS

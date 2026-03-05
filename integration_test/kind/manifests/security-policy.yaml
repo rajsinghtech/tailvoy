@@ -37,3 +37,43 @@ spec:
       - name: listener
         type: Value
         value: "default/eg/grpc"
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata:
+  name: ext-authz-http-public
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: http-route-public
+  extAuth:
+    grpc:
+      backendRefs:
+        - name: tailvoy-authz
+          namespace: envoy-gateway-system
+          port: 9001
+    contextExtensions:
+      - name: listener
+        type: Value
+        value: "default/eg/http"
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata:
+  name: ext-authz-http-admin
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: http-route-admin
+  extAuth:
+    grpc:
+      backendRefs:
+        - name: tailvoy-authz
+          namespace: envoy-gateway-system
+          port: 9001
+    contextExtensions:
+      - name: listener
+        type: Value
+        value: "default/eg/http"

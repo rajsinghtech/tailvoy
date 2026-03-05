@@ -15,6 +15,44 @@ spec:
         - name: backend
           port: 8080
 ---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: http-route-public
+spec:
+  parentRefs:
+    - name: eg
+      sectionName: http
+  hostnames:
+    - public.tailvoy.test
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: backend
+          port: 8080
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: http-route-admin
+spec:
+  parentRefs:
+    - name: eg
+      sectionName: http
+  hostnames:
+    - admin.tailvoy.test
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: backend
+          port: 8080
+---
 apiVersion: gateway.networking.k8s.io/v1alpha2
 kind: TCPRoute
 metadata:

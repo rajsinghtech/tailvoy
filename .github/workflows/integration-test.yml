@@ -94,7 +94,7 @@ jobs:
           AUTHKEY_JSON=$(./integration_test/scripts/create-auth-key.sh \
             "${{ steps.tailnet_token.outputs.tailnet_token }}" \
             "${{ steps.create.outputs.tailnet_name }}" \
-            "kind" true true true)
+            "user" true true true)
           TS_AUTHKEY=$(echo "$AUTHKEY_JSON" | jq -r '.key')
           echo "ts_authkey=$TS_AUTHKEY" >> "$GITHUB_OUTPUT"
 

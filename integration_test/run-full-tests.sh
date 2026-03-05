@@ -106,6 +106,20 @@ echo "=== Checking Envoy health ==="
 docker compose -f "$COMPOSE_FILE" logs tailvoy 2>&1 | grep -q "all dependencies initialized" && echo "Envoy initialized" || echo "WARNING: Envoy may not have initialized"
 
 # =====================================================
+# UDP VIP WARNING CHECK
+# =====================================================
+echo ""
+echo "========================================"
+echo "  UDP VIP WARNING CHECK"
+echo "========================================"
+
+if docker compose -f "$COMPOSE_FILE" logs tailvoy 2>&1 | grep -q "UDP listener has no VIP service support"; then
+    test_pass "UDP VIP warning emitted in logs"
+else
+    test_fail "UDP VIP warning emitted in logs" "warning not found in tailvoy logs"
+fi
+
+# =====================================================
 # HTTP L7 TESTS (port 80, through Envoy ext_authz)
 # =====================================================
 echo ""
@@ -125,7 +139,7 @@ assert_http "L7: /api/data allow" "http://$IP:80/api/data" "200"
 assert_http "L7: /api/v1/users allow" "http://$IP:80/api/v1/users" "200"
 
 # Allow: /admin/* prefix
-assert_http "L7: /admin/settings allow" "http://$IP:80/admin/settings" "200"
+assert_http "L7: /admin/settings deny (not in caps)" "http://$IP:80/admin/settings" "403"
 
 # Deny: / root (not in cap routes)
 assert_http "L7: / deny (not in routes)" "http://$IP:80/" "403"
@@ -213,19 +227,9 @@ echo "========================================"
 if [ -n "$NC_CMD" ]; then
     UDP_RESP=$({ echo -n "hello"; sleep 3; } | $NC_CMD -u -w 5 "$IP" 9053 2>/dev/null || true)
     if echo "$UDP_RESP" | grep -q "echo: hello"; then
-        test_pass "UDP: echo allow (cap grants L4 access)"
+        test_fail "UDP: deny (udp not in caps)" "got response, expected deny"
     else
-        # Fallback: try socat or bash /dev/udp
-        if command -v socat &>/dev/null; then
-            UDP_RESP2=$(echo -n "hello" | socat -T5 - UDP:"$IP":9053 2>/dev/null || true)
-        else
-            UDP_RESP2=$(bash -c "exec 3<>/dev/udp/$IP/9053; echo -n 'hello' >&3; read -t 5 resp <&3; echo \"\$resp\"" 2>/dev/null || true)
-        fi
-        if echo "$UDP_RESP2" | grep -q "echo: hello"; then
-            test_pass "UDP: echo allow (cap grants L4 access)"
-        else
-            test_fail "UDP: echo allow (cap grants L4 access)" "ncat='$UDP_RESP', fallback='${UDP_RESP2:-}'"
-        fi
+        test_pass "UDP: deny (udp not in caps)"
     fi
 else
     echo "  SKIP: UDP tests (no ncat/nc)"

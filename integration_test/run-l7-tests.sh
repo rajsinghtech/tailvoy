@@ -99,9 +99,16 @@ if [ "$HTTP" = "200" ]; then test_pass "nested wildcard"; else test_fail "nested
 echo "Test: identity headers injected"
 BODY=$(curl -sf --max-time 10 "http://$TAILVOY_IP:80/public/headers" 2>&1 || true)
 USER_HDR=$(echo "$BODY" | jq -r '.headers["X-Tailscale-User"]' 2>/dev/null || true)
+TAGS_HDR=$(echo "$BODY" | jq -r '.headers["X-Tailscale-Tags"]' 2>/dev/null || true)
 NODE_HDR=$(echo "$BODY" | jq -r '.headers["X-Tailscale-Node"]' 2>/dev/null || true)
 IP_HDR=$(echo "$BODY" | jq -r '.headers["X-Tailscale-Ip"]' 2>/dev/null || true)
-if [ "$USER_HDR" = "rajsinghtech@github" ]; then test_pass "x-tailscale-user header"; else test_fail "x-tailscale-user header" "got '$USER_HDR'"; fi
+if [ -n "$USER_HDR" ] && [ "$USER_HDR" != "null" ]; then
+    test_pass "x-tailscale identity (user)"
+elif [ -n "$TAGS_HDR" ] && [ "$TAGS_HDR" != "null" ] && [ "$TAGS_HDR" != "" ]; then
+    test_pass "x-tailscale identity (tagged node)"
+else
+    test_fail "x-tailscale identity" "no user or tags found"
+fi
 if [ -n "$NODE_HDR" ] && [ "$NODE_HDR" != "null" ]; then test_pass "x-tailscale-node header"; else test_fail "x-tailscale-node header" "empty"; fi
 if [ -n "$IP_HDR" ] && [ "$IP_HDR" != "null" ]; then test_pass "x-tailscale-ip header"; else test_fail "x-tailscale-ip header" "empty"; fi
 

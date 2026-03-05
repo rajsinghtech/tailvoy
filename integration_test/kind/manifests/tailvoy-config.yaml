@@ -4,7 +4,7 @@ metadata:
   name: tailvoy-policy
   namespace: envoy-gateway-system
 data:
-  policy.yaml: |
+  config.yaml: |
     tailscale:
       service: "tailvoy-kind-test"
       clientId: "${TS_CLIENT_ID}"

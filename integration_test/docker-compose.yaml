@@ -13,12 +13,12 @@ services:
       - TS_CLIENT_ID=${TS_CLIENT_ID}
       - TS_CLIENT_SECRET=${TS_CLIENT_SECRET}
     command:
-      - "--policy"
-      - "/policy.yaml"
+      - "--config"
+      - "/config.yaml"
       - "--standalone"
       - "--log-level"
       - "debug"
     volumes:
-      - ./l7-test-policy-docker.yaml:/policy.yaml:ro
+      - ./l7-test-policy-docker.yaml:/config.yaml:ro
     depends_on:
       - backend

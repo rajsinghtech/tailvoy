@@ -73,7 +73,7 @@ if [ -z "${TS_CLIENT_ID:-}" ] || [ -z "${TS_CLIENT_SECRET:-}" ]; then
 fi
 if [ -z "${TS_CLIENT_ID:-}" ]; then echo "FATAL: TS_CLIENT_ID is empty"; exit 1; fi
 if [ -z "${TS_CLIENT_SECRET:-}" ]; then echo "FATAL: TS_CLIENT_SECRET is empty"; exit 1; fi
-"$SCRIPT_DIR/tailvoy" --policy "$SCRIPT_DIR/l4-test-policy.yaml" --log-level debug 2>&1 &
+"$SCRIPT_DIR/tailvoy" --config "$SCRIPT_DIR/l4-test-policy.yaml" --log-level debug 2>&1 &
 TAILVOY_PID=$!
 
 # --- Wait for tailnet join ---

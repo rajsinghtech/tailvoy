@@ -44,7 +44,7 @@ func run(args []string) error {
 	tailvoyArgs, envoyArgs := envoy.ParseArgs(args)
 
 	fs := flag.NewFlagSet("tailvoy", flag.ContinueOnError)
-	policyPath := fs.String("policy", "policy.yaml", "path to policy YAML")
+	configPath := fs.String("config", "config.yaml", "path to config YAML")
 	authzAddr := fs.String("authz-addr", "127.0.0.1:9001", "ext_authz listen address")
 	logLevel := fs.String("log-level", "info", "log level (debug/info/warn/error)")
 	standalone := fs.Bool("standalone", false, "generate envoy config from policy")
@@ -69,7 +69,7 @@ func run(args []string) error {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 
 	// Load policy config.
-	cfg, err := config.Load(*policyPath)
+	cfg, err := config.Load(*configPath)
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}

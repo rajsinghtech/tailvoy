@@ -30,7 +30,7 @@ func TestLoadFromFile(t *testing.T) {
 	t.Setenv("TS_CLIENT_ID", "test-client-id")
 	t.Setenv("TS_CLIENT_SECRET", "test-client-secret")
 
-	cfg, err := Load(testdataPath("policy.yaml"))
+	cfg, err := Load(testdataPath("config.yaml"))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -51,7 +51,7 @@ func TestEnvVarExpansion(t *testing.T) {
 	t.Setenv("TS_CLIENT_ID", "test-id")
 	t.Setenv("TS_CLIENT_SECRET", secret)
 
-	cfg, err := Load(testdataPath("policy.yaml"))
+	cfg, err := Load(testdataPath("config.yaml"))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -158,7 +158,7 @@ func TestListenerByName(t *testing.T) {
 	t.Setenv("TS_CLIENT_ID", "id")
 	t.Setenv("TS_CLIENT_SECRET", "secret")
 
-	cfg, err := Load(testdataPath("policy.yaml"))
+	cfg, err := Load(testdataPath("config.yaml"))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -197,7 +197,7 @@ func TestL7Listeners(t *testing.T) {
 	t.Setenv("TS_CLIENT_ID", "id")
 	t.Setenv("TS_CLIENT_SECRET", "secret")
 
-	cfg, err := Load(testdataPath("policy.yaml"))
+	cfg, err := Load(testdataPath("config.yaml"))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}

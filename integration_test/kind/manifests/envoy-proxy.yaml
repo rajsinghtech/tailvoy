@@ -20,8 +20,8 @@ spec:
                     - name: envoy
                       command:
                         - tailvoy
-                        - --policy
-                        - /etc/tailvoy/policy.yaml
+                        - --config
+                        - /etc/tailvoy/config.yaml
                         - --authz-addr
                         - 0.0.0.0:9001
                         - --log-level

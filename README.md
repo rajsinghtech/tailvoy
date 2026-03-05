@@ -22,7 +22,7 @@ Authorization is driven entirely by Tailscale ACL grants using the `rajsingh.inf
 
 | Dimension | Controls | Source |
 |-----------|----------|--------|
-| `listeners` | Which named listeners a peer can connect to | Listener name from policy.yaml (static) or Envoy dynamic listener name (discovery) |
+| `listeners` | Which named listeners a peer can connect to | Listener name from config.yaml (static) or Envoy dynamic listener name (discovery) |
 | `routes` | Which HTTP/gRPC paths are accessible (L7 only) | Request path |
 | `hostnames` | Which hostnames are allowed (SNI or Host header) | TLS ClientHello SNI / HTTP Host header |
 
@@ -30,7 +30,7 @@ Authorization is driven entirely by Tailscale ACL grants using the `rajsingh.inf
 **Across rules**: OR -- any matching rule grants access.
 **Omitted dimension**: unrestricted on that dimension.
 
-The policy file (`policy.yaml`) only defines infrastructure -- Tailscale identity and listener configuration. All authorization lives in your Tailscale ACL.
+The config file (`config.yaml`) only defines infrastructure -- Tailscale identity and listener configuration. All authorization lives in your Tailscale ACL.
 
 ## Authentication
 
@@ -74,7 +74,7 @@ tailvoy creates the VIP service on startup via the Tailscale API and advertises 
 
 tailvoy supports two mutually exclusive ways to define listeners:
 
-- **Static listeners** (`listeners[]`): You declare every listener explicitly in policy.yaml. Full control over names, ports, and protocols.
+- **Static listeners** (`listeners[]`): You declare every listener explicitly in config.yaml. Full control over names, ports, and protocols.
 - **Discovery mode** (`discovery`): tailvoy polls Envoy's admin API to auto-discover listeners. No listener config needed -- tailvoy creates and removes tsnet listeners dynamically as Envoy's configuration changes.
 
 Discovery mode is ideal for Envoy Gateway deployments where listeners are managed by Gateway API resources and change over time. Static mode is better when you want explicit control or are running standalone.
@@ -99,7 +99,7 @@ An empty rule `[{}]` grants full access to all listeners, paths, and hostnames.
 
 A web app where different users get access to different paths.
 
-**policy.yaml:**
+**config.yaml:**
 ```yaml
 tailscale:
   service: "web-gw"
@@ -186,7 +186,7 @@ The DBA can connect to the postgres listener but not HTTP. The frontend can hit 
 
 A database port that only tagged nodes can reach. No L7 policy -- just L4 identity gating.
 
-**policy.yaml:**
+**config.yaml:**
 ```yaml
 listeners:
   - name: postgres
@@ -211,7 +211,7 @@ listeners:
 
 > **Note:** UDP listeners are not currently supported by VIP services. In static mode, tailvoy will skip UDP listeners with a warning. UDP proxy code is retained for future VIP service support.
 
-**policy.yaml:**
+**config.yaml:**
 ```yaml
 listeners:
   - name: dns
@@ -238,7 +238,7 @@ All tailnet members can send DNS queries. Non-members are dropped at L4.
 
 gRPC paths follow the `/package.Service/Method` convention. Route matching works the same as HTTP.
 
-**policy.yaml:**
+**config.yaml:**
 ```yaml
 listeners:
   - name: grpc
@@ -275,7 +275,7 @@ listeners:
 
 tailvoy forwards the raw TLS connection without terminating it. It peeks at the TLS ClientHello to extract the SNI server name for hostname-based access control.
 
-**policy.yaml:**
+**config.yaml:**
 ```yaml
 listeners:
   - name: tls
@@ -341,7 +341,7 @@ This grants access only to `api.example.com` on the HTTP listener, and only for 
 
 Instead of declaring listeners manually, let tailvoy discover them from Envoy's admin API. Listeners are created and removed automatically as Gateway resources change.
 
-**policy.yaml:**
+**config.yaml:**
 ```yaml
 tailscale:
   service: "my-gateway"
@@ -389,7 +389,7 @@ contextExtensions:
 
 A single tailvoy instance handling HTTP, TCP, UDP, gRPC, and TLS -- each on its own port.
 
-**policy.yaml:**
+**config.yaml:**
 ```yaml
 tailscale:
   service: "my-gateway"
@@ -533,7 +533,7 @@ Requires Go 1.25+.
 ### Standalone mode
 
 ```sh
-tailvoy -policy policy.yaml -standalone
+tailvoy -config config.yaml -standalone
 ```
 
 ### Envoy Gateway data plane
@@ -561,7 +561,7 @@ spec:
                 spec:
                   containers:
                     - name: envoy
-                      command: ["tailvoy", "--policy", "/etc/tailvoy/policy.yaml",
+                      command: ["tailvoy", "--config", "/etc/tailvoy/config.yaml",
                                 "--authz-addr", "0.0.0.0:9001", "--"]
                       env:
                         - name: TS_CLIENT_ID
@@ -612,7 +612,7 @@ spec:
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-policy` | `policy.yaml` | Path to policy file |
+| `-config` | `config.yaml` | Path to config file |
 | `-authz-addr` | `127.0.0.1:9001` | ext_authz listen address |
 | `-log-level` | `info` | Log level (`debug`/`info`/`warn`/`error`) |
 | `-standalone` | `false` | Auto-generate Envoy bootstrap from policy |
@@ -625,9 +625,9 @@ Any arguments after `--` are passed directly to Envoy.
 docker run \
   -e TS_CLIENT_ID=tskey-client-... \
   -e TS_CLIENT_SECRET=tskey-client-secret-... \
-  -v $(pwd)/policy.yaml:/policy.yaml \
+  -v $(pwd)/config.yaml:/config.yaml \
   ghcr.io/rajsinghtech/tailvoy:latest \
-  -policy /policy.yaml -standalone
+  -config /config.yaml -standalone
 ```
 
 ## Reference

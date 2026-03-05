@@ -1,4 +1,4 @@
-# Example tailvoy policy
+# Example tailvoy config
 # Copy and modify for your deployment
 #
 # Authorization is defined in your Tailscale ACL policy (policy.hujson)

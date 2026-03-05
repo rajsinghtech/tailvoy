@@ -19,13 +19,13 @@ services:
       - TS_CLIENT_ID=${TS_CLIENT_ID}
       - TS_CLIENT_SECRET=${TS_CLIENT_SECRET}
     command:
-      - "--policy"
-      - "/policy.yaml"
+      - "--config"
+      - "/config.yaml"
       - "--standalone"
       - "--log-level"
       - "debug"
     volumes:
-      - ./full-test-policy.yaml:/policy.yaml:ro
+      - ./full-test-policy.yaml:/config.yaml:ro
     depends_on:
       - backend
       - tcp-echo

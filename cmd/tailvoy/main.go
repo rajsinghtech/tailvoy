@@ -231,7 +231,6 @@ func run(args []string) error {
 
 		// Start TCP listeners via ListenService (VIP) and Listen (node IP).
 		for _, l := range tcpListeners {
-			l := l
 			port, err := strconv.ParseUint(l.Port(), 10, 16)
 			if err != nil {
 				cancel()
@@ -281,7 +280,6 @@ func run(args []string) error {
 		// Start UDP listeners on the node IP (VIP services don't support UDP).
 		if tsIP != "" {
 			for _, l := range udpListeners {
-				l := l
 				pc, err := ts.ListenPacket("udp", tsIP+":"+l.Port())
 				if err != nil {
 					logger.Error("udp listener error", "name", l.Name, "err", err)

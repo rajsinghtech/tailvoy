@@ -268,7 +268,7 @@ echo "========================================"
 echo "  HTTPRoute TESTS"
 echo "========================================"
 
-# Cap rule: {"listeners": ["http"], "routes": ["/public/*", "/health", "/api/*", "/admin/*"]}
+# Cap rules: hostname-restricted {routes: ["/api/*", "/health"]} + unrestricted {routes: ["/public/*", "/health"]}
 # SecurityPolicy contextExtensions: listener=http
 
 # Allow: prefix match /public/*

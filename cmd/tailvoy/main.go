@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"sync"
 	"syscall"
 
@@ -18,6 +19,8 @@ import (
 	"github.com/rajsinghtech/tailvoy/internal/identity"
 	"github.com/rajsinghtech/tailvoy/internal/policy"
 	"github.com/rajsinghtech/tailvoy/internal/proxy"
+	"github.com/rajsinghtech/tailvoy/internal/service"
+	tailscale "tailscale.com/client/tailscale/v2"
 	"tailscale.com/tsnet"
 )
 
@@ -75,10 +78,21 @@ func run(args []string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	// Start tsnet.
+	// Build Tailscale API client for VIP service management.
+	tsClient := &tailscale.Client{
+		Tailnet: cfg.Tailscale.Tailnet,
+		Auth: &tailscale.OAuth{
+			ClientID:     cfg.Tailscale.ClientID,
+			ClientSecret: cfg.Tailscale.ClientSecret,
+		},
+	}
+
+	// Start tsnet with OAuth credentials.
 	ts := &tsnet.Server{
-		Hostname: cfg.Tailscale.Hostname,
-		AuthKey:  cfg.Tailscale.ClientSecret,
+		Hostname:      cfg.Tailscale.Hostname,
+		AuthKey:       cfg.Tailscale.ClientSecret,
+		Ephemeral:     true,
+		AdvertiseTags: cfg.Tailscale.Tags,
 	}
 	defer func() { _ = ts.Close() }()
 
@@ -93,6 +107,7 @@ func run(args []string) error {
 	}
 
 	// Build components.
+	svcMgr := service.New(tsClient, cfg.Tailscale.ServiceName(), cfg.Tailscale.ServiceTags, logger)
 	engine := policy.NewEngine()
 	resolver := identity.NewResolver(lc)
 	defer resolver.Close()
@@ -169,7 +184,7 @@ func run(args []string) error {
 			wg.Wait()
 			return fmt.Errorf("discovery setup: %w", err)
 		}
-		dynMgr := proxy.NewDynamicListenerManager(&tsnetAdapter{ts}, listenerMgr, udpProxy, nil, "", logger, tsIP)
+		dynMgr := proxy.NewDynamicListenerManager(&tsnetAdapter{ts}, listenerMgr, udpProxy, svcMgr, cfg.Tailscale.ServiceName(), logger, tsIP)
 
 		wg.Add(1)
 		go func() {
@@ -182,49 +197,63 @@ func run(args []string) error {
 			}
 		}()
 	} else {
-		// Static mode: start tsnet listeners for each configured listener.
+		// Static mode: start listeners via ListenService.
+		svcName := cfg.Tailscale.ServiceName()
+
+		// Collect TCP ports, warn and skip UDP.
+		var tcpPorts []string
+		var tcpListeners []*config.Listener
 		for i := range cfg.Listeners {
 			l := &cfg.Listeners[i]
-			switch l.Protocol {
-			case "udp":
-				if tsIP == "" {
-					cancel()
-					wg.Wait()
-					return fmt.Errorf("no tailscale IPv4 for UDP listener %s", l.Name)
-				}
-				pc, err := ts.ListenPacket("udp", fmt.Sprintf("%s:%s", tsIP, l.Port()))
-				if err != nil {
-					cancel()
-					wg.Wait()
-					return fmt.Errorf("listen udp %s (%s): %w", l.Name, l.Listen, err)
-				}
-				logger.Info("udp listener started", "name", l.Name, "addr", l.Listen)
+			if l.Protocol == "udp" {
+				logger.Warn("UDP listeners not supported with VIP services, skipping", "name", l.Name)
+				continue
+			}
+			tcpPorts = append(tcpPorts, l.Port())
+			tcpListeners = append(tcpListeners, l)
+		}
 
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
-					if err := udpProxy.Serve(ctx, pc, l.Forward, resolver, engine, l.Name); err != nil {
-						logger.Error("udp listener error", "name", l.Name, "err", err)
-					}
-				}()
-			default: // tcp
-				ln, err := ts.Listen("tcp", l.Listen)
-				if err != nil {
-					cancel()
-					wg.Wait()
-					return fmt.Errorf("listen %s (%s): %w", l.Name, l.Listen, err)
-				}
-				logger.Info("listener started", "name", l.Name, "addr", l.Listen)
-
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
-					if err := listenerMgr.Serve(ctx, ln, l); err != nil {
-						logger.Error("listener error", "name", l.Name, "err", err)
-					}
-				}()
+		// Create/update VIP service with discovered ports.
+		if len(tcpPorts) > 0 {
+			if err := svcMgr.Ensure(ctx, tcpPorts); err != nil {
+				cancel()
+				wg.Wait()
+				return fmt.Errorf("ensure VIP service: %w", err)
 			}
 		}
+
+		// Start TCP listeners via ListenService.
+		for _, l := range tcpListeners {
+			l := l
+			port, err := strconv.ParseUint(l.Port(), 10, 16)
+			if err != nil {
+				cancel()
+				wg.Wait()
+				return fmt.Errorf("invalid port for %s: %w", l.Name, err)
+			}
+			ln, err := ts.ListenService(svcName, tsnet.ServiceModeTCP{Port: uint16(port)})
+			if err != nil {
+				cancel()
+				wg.Wait()
+				return fmt.Errorf("listen service %s (port %d): %w", l.Name, port, err)
+			}
+			logger.Info("service listener started", "name", l.Name, "service", svcName, "port", port)
+
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if err := listenerMgr.Serve(ctx, ln, l); err != nil {
+					logger.Error("listener error", "name", l.Name, "err", err)
+				}
+			}()
+		}
+
+		// Delete VIP service on shutdown.
+		defer func() {
+			if err := svcMgr.Delete(context.Background()); err != nil {
+				logger.Error("failed to delete VIP service on shutdown", "err", err)
+			}
+		}()
 	}
 
 	// Start envoy if args are present.

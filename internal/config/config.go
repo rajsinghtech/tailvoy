@@ -34,7 +34,6 @@ func (d *DiscoveryConfig) ParsedPollInterval() time.Duration {
 }
 
 type TailscaleConfig struct {
-	Hostname     string   `yaml:"hostname"`
 	Service      string   `yaml:"service"`
 	ClientID     string   `yaml:"clientId"`
 	ClientSecret string   `yaml:"clientSecret"`
@@ -42,11 +41,14 @@ type TailscaleConfig struct {
 	ServiceTags  []string `yaml:"serviceTags"`
 }
 
+// Hostname returns the tsnet node hostname (<service>-tailvoy).
+func (t *TailscaleConfig) Hostname() string {
+	return t.Service + "-tailvoy"
+}
+
+// ServiceName returns the VIP service name (svc:<service>).
 func (t *TailscaleConfig) ServiceName() string {
-	if t.Service != "" {
-		return t.Service
-	}
-	return "svc:" + t.Hostname
+	return "svc:" + t.Service
 }
 
 type Listener struct {
@@ -94,8 +96,8 @@ func expandEnvVars(s string) string {
 }
 
 func (c *Config) validate() error {
-	if c.Tailscale.Hostname == "" {
-		return fmt.Errorf("tailscale.hostname is required")
+	if c.Tailscale.Service == "" {
+		return fmt.Errorf("tailscale.service is required")
 	}
 	if c.Tailscale.ClientID == "" {
 		return fmt.Errorf("tailscale.clientId is required")

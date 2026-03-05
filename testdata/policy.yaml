@@ -1,5 +1,5 @@
 tailscale:
-  hostname: "tailvoy-test"
+  service: "tailvoy-test"
   clientId: "${TS_CLIENT_ID}"
   clientSecret: "${TS_CLIENT_SECRET}"
   tags:

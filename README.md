@@ -16,7 +16,7 @@ Tailnet Client (100.x.x.x)
 
 ## How it works
 
-tailvoy embeds [tsnet](https://pkg.go.dev/tailscale.com/tsnet) to join the tailnet as an ephemeral OAuth node -- no sidecar Tailscale daemon needed. It uses Tailscale [VIP services](https://tailscale.com/kb/1432/vip-services) (via `tsnet.ListenService`) so multiple replicas can serve the same stable service address. Every inbound connection triggers a WhoIs lookup to resolve the caller's Tailscale identity and peer capabilities.
+tailvoy embeds [tsnet](https://pkg.go.dev/tailscale.com/tsnet) to join the tailnet as an ephemeral OAuth node -- no sidecar Tailscale daemon needed. It uses [Tailscale Services](https://tailscale.com/docs/features/tailscale-services) (via `tsnet.ListenService`) so multiple replicas can serve the same stable service address. Every inbound connection triggers a WhoIs lookup to resolve the caller's Tailscale identity and peer capabilities.
 
 Authorization is driven entirely by Tailscale ACL grants using the `rajsingh.info/cap/tailvoy` capability. Each cap rule has three optional dimensions:
 
@@ -38,7 +38,7 @@ tailvoy authenticates to Tailscale using OAuth client credentials. Create an OAu
 
 ```yaml
 tailscale:
-  hostname: "my-gw"
+  service: "my-gw"
   clientId: "${TS_CLIENT_ID}"
   clientSecret: "${TS_CLIENT_SECRET}"
   tags:
@@ -47,9 +47,9 @@ tailscale:
     - "tag:my-gw"        # ACL tags for the VIP service
 ```
 
+- **`service`**: The service name. The tsnet node hostname is derived as `<service>-tailvoy` and the VIP service name as `svc:<service>`.
 - **`tags`**: Applied to the ephemeral tsnet node. Must match your ACL `tagOwners`.
 - **`serviceTags`**: Applied to the VIP service that exposes listeners on the tailnet. Must match `autoApprovers.services` in your ACL.
-- **`service`** (optional): Explicit VIP service name. Defaults to `svc:<hostname>`.
 
 tailvoy creates the VIP service on startup via the Tailscale API and advertises TCP ports for each listener. The service persists across restarts so multiple replicas can serve the same address.
 
@@ -102,7 +102,7 @@ A web app where different users get access to different paths.
 **policy.yaml:**
 ```yaml
 tailscale:
-  hostname: "web-gw"
+  service: "web-gw"
   clientId: "${TS_CLIENT_ID}"
   clientSecret: "${TS_CLIENT_SECRET}"
   tags:
@@ -344,7 +344,7 @@ Instead of declaring listeners manually, let tailvoy discover them from Envoy's 
 **policy.yaml:**
 ```yaml
 tailscale:
-  hostname: "my-gateway"
+  service: "my-gateway"
   clientId: "${TS_CLIENT_ID}"
   clientSecret: "${TS_CLIENT_SECRET}"
   tags:
@@ -392,7 +392,7 @@ A single tailvoy instance handling HTTP, TCP, UDP, gRPC, and TLS -- each on its 
 **policy.yaml:**
 ```yaml
 tailscale:
-  hostname: "my-gateway"
+  service: "my-gateway"
   clientId: "${TS_CLIENT_ID}"
   clientSecret: "${TS_CLIENT_SECRET}"
   tags:

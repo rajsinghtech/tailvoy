@@ -6,7 +6,7 @@
 # See docs/plans/2026-03-04-cap-based-policy-design.md for details.
 
 tailscale:
-  hostname: "tailvoy-gw"
+  service: "tailvoy-gw"
   clientId: "${TS_CLIENT_ID}"
   clientSecret: "${TS_CLIENT_SECRET}"
   tags:

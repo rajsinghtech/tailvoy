@@ -50,16 +50,16 @@ echo "=== Waiting for tailnet join ==="
 TAILVOY_IP=""
 for i in $(seq 1 60); do
     TAILVOY_IP=$(tailscale status --json 2>/dev/null \
-        | jq -r '.Peer[] | select(.HostName == "tailvoy-l7-test") | .TailscaleIPs[0]' 2>/dev/null || true)
+        | jq -r '.Peer[] | select(.HostName == "tailvoy-l7-test-tailvoy") | .TailscaleIPs[0]' 2>/dev/null || true)
     if [ -n "$TAILVOY_IP" ] && [ "$TAILVOY_IP" != "null" ]; then
-        echo "tailvoy-l7-test joined as $TAILVOY_IP"
+        echo "tailvoy-l7-test-tailvoy joined as $TAILVOY_IP"
         break
     fi
     sleep 2
 done
 
 if [ -z "$TAILVOY_IP" ] || [ "$TAILVOY_IP" = "null" ]; then
-    echo "FATAL: tailvoy-l7-test did not join"
+    echo "FATAL: tailvoy-l7-test-tailvoy did not join"
     docker compose -f "$SCRIPT_DIR/docker-compose.yaml" logs tailvoy 2>&1 | tail -20
     exit 1
 fi

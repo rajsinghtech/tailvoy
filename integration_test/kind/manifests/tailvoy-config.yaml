@@ -6,7 +6,7 @@ metadata:
 data:
   policy.yaml: |
     tailscale:
-      hostname: "tailvoy-kind-test"
+      service: "tailvoy-kind-test"
       clientId: "${TS_CLIENT_ID}"
       clientSecret: "${TS_CLIENT_SECRET}"
       tags:

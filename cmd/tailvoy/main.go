@@ -90,14 +90,14 @@ func run(args []string) error {
 
 	// Start tsnet with OAuth credentials.
 	ts := &tsnet.Server{
-		Hostname:      cfg.Tailscale.Hostname,
+		Hostname:      cfg.Tailscale.Hostname(),
 		AuthKey:       cfg.Tailscale.ClientSecret,
 		Ephemeral:     true,
 		AdvertiseTags: cfg.Tailscale.Tags,
 	}
 	defer func() { _ = ts.Close() }()
 
-	logger.Info("connecting to tailnet", "hostname", cfg.Tailscale.Hostname)
+	logger.Info("connecting to tailnet", "hostname", cfg.Tailscale.Hostname())
 	if _, err := ts.Up(ctx); err != nil {
 		return fmt.Errorf("tsnet up: %w", err)
 	}

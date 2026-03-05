@@ -14,16 +14,16 @@ func testdataPath(name string) string {
 }
 
 // oauthBlock returns the minimum required tailscale YAML block for tests.
-func oauthBlock(hostname string) string {
+func oauthBlock(svc string) string {
 	return fmt.Sprintf(`tailscale:
-  hostname: %q
+  service: %q
   clientId: "client-id"
   clientSecret: "client-secret"
   tags:
     - "tag:test"
   serviceTags:
     - "tag:svc"
-`, hostname)
+`, svc)
 }
 
 func TestLoadFromFile(t *testing.T) {
@@ -35,8 +35,8 @@ func TestLoadFromFile(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 
-	if cfg.Tailscale.Hostname != "tailvoy-test" {
-		t.Errorf("hostname = %q, want %q", cfg.Tailscale.Hostname, "tailvoy-test")
+	if cfg.Tailscale.Service != "tailvoy-test" {
+		t.Errorf("hostname = %q, want %q", cfg.Tailscale.Service, "tailvoy-test")
 	}
 	if cfg.Tailscale.ClientID != "test-client-id" {
 		t.Errorf("clientId = %q, want %q", cfg.Tailscale.ClientID, "test-client-id")
@@ -71,8 +71,8 @@ func TestParseMinimal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if cfg.Tailscale.Hostname != "minimal" {
-		t.Errorf("hostname = %q, want %q", cfg.Tailscale.Hostname, "minimal")
+	if cfg.Tailscale.Service != "minimal" {
+		t.Errorf("hostname = %q, want %q", cfg.Tailscale.Service, "minimal")
 	}
 }
 
@@ -83,7 +83,7 @@ func TestValidationErrors(t *testing.T) {
 		want string
 	}{
 		{
-			name: "missing hostname",
+			name: "missing service",
 			yaml: `
 tailscale:
   clientId: "id"
@@ -96,7 +96,7 @@ listeners:
     listen: ":80"
     forward: "localhost:80"
 `,
-			want: "tailscale.hostname is required",
+			want: "tailscale.service is required",
 		},
 		{
 			name: "duplicate listener name",
@@ -270,7 +270,7 @@ func TestParse_AllOptionalFieldsMissing(t *testing.T) {
 	// With required OAuth fields, hostname-only config should fail validation.
 	data := []byte(`
 tailscale:
-  hostname: bare-minimum
+  service: bare-minimum
 `)
 	_, err := Parse(data)
 	if err == nil {
@@ -304,7 +304,7 @@ func TestEnvVarExpansion_NestedSyntax(t *testing.T) {
 
 	data := []byte(`
 tailscale:
-  hostname: "test-${INNER}"
+  service: "test-${INNER}"
   clientId: "id"
   clientSecret: "secret"
   tags:
@@ -321,8 +321,8 @@ listeners:
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if cfg.Tailscale.Hostname != "test-resolved" {
-		t.Errorf("hostname = %q, want %q", cfg.Tailscale.Hostname, "test-resolved")
+	if cfg.Tailscale.Service != "test-resolved" {
+		t.Errorf("hostname = %q, want %q", cfg.Tailscale.Service, "test-resolved")
 	}
 }
 
@@ -332,7 +332,7 @@ func TestEnvVarExpansion_MultipleVars(t *testing.T) {
 
 	data := []byte(`
 tailscale:
-  hostname: "${HOST}"
+  service: "${HOST}"
   clientId: "id"
   clientSecret: "secret"
   tags:
@@ -349,8 +349,8 @@ listeners:
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if cfg.Tailscale.Hostname != "myhost" {
-		t.Errorf("hostname = %q, want %q", cfg.Tailscale.Hostname, "myhost")
+	if cfg.Tailscale.Service != "myhost" {
+		t.Errorf("hostname = %q, want %q", cfg.Tailscale.Service, "myhost")
 	}
 	if cfg.Listeners[0].Forward != "myhost:9090" {
 		t.Errorf("forward = %q, want %q", cfg.Listeners[0].Forward, "myhost:9090")
@@ -381,7 +381,7 @@ func TestParse_OAuthConfig(t *testing.T) {
 
 	data := []byte(`
 tailscale:
-  hostname: "my-proxy"
+  service: "my-proxy"
   clientId: "${TS_CID}"
   clientSecret: "${TS_CSEC}"
   tags:
@@ -419,31 +419,21 @@ func TestParse_ServiceNameDefault(t *testing.T) {
 	}
 }
 
-func TestParse_ServiceNameExplicit(t *testing.T) {
-	data := []byte(`
-tailscale:
-  hostname: "my-proxy"
-  service: "custom-svc"
-  clientId: "id"
-  clientSecret: "secret"
-  tags:
-    - "tag:test"
-  serviceTags:
-    - "tag:svc"
-`)
+func TestParse_Hostname(t *testing.T) {
+	data := []byte(oauthBlock("my-proxy"))
 	cfg, err := Parse(data)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if got := cfg.Tailscale.ServiceName(); got != "custom-svc" {
-		t.Errorf("ServiceName() = %q, want %q", got, "custom-svc")
+	if got := cfg.Tailscale.Hostname(); got != "my-proxy-tailvoy" {
+		t.Errorf("Hostname() = %q, want %q", got, "my-proxy-tailvoy")
 	}
 }
 
 func TestValidation_MissingClientId(t *testing.T) {
 	data := []byte(`
 tailscale:
-  hostname: "test"
+  service: "test"
   clientSecret: "secret"
   tags: ["tag:x"]
   serviceTags: ["tag:y"]
@@ -460,7 +450,7 @@ tailscale:
 func TestValidation_MissingClientSecret(t *testing.T) {
 	data := []byte(`
 tailscale:
-  hostname: "test"
+  service: "test"
   clientId: "id"
   tags: ["tag:x"]
   serviceTags: ["tag:y"]
@@ -477,7 +467,7 @@ tailscale:
 func TestValidation_MissingTags(t *testing.T) {
 	data := []byte(`
 tailscale:
-  hostname: "test"
+  service: "test"
   clientId: "id"
   clientSecret: "secret"
   serviceTags: ["tag:y"]
@@ -494,7 +484,7 @@ tailscale:
 func TestValidation_MissingServiceTags(t *testing.T) {
 	data := []byte(`
 tailscale:
-  hostname: "test"
+  service: "test"
   clientId: "id"
   clientSecret: "secret"
   tags: ["tag:x"]

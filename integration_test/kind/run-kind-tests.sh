@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$SCRIPT_DIR/../.."
 CLUSTER_NAME="tailvoy-kind-test"
 EG_VERSION="v1.7.0"
-TAILVOY_HOSTNAME="tailvoy-kind-test"
+TAILVOY_HOSTNAME="tailvoy-kind-test-tailvoy"
 
 PASS=0
 FAIL=0

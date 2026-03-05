@@ -48,7 +48,7 @@ func TestListenerManagerAllowAndForward(t *testing.T) {
 
 	// 2. Config with a listener pointing to the echo backend.
 	cfg := &config.Config{
-		Tailscale: config.TailscaleConfig{Hostname: "test"},
+		Tailscale: config.TailscaleConfig{Service: "test"},
 		Listeners: []config.Listener{
 			{
 				Name:     "echo",
@@ -135,7 +135,7 @@ func TestListenerManagerRapidConnectDisconnect(t *testing.T) {
 	backend := startEchoServer(t)
 
 	cfg := &config.Config{
-		Tailscale: config.TailscaleConfig{Hostname: "test"},
+		Tailscale: config.TailscaleConfig{Service: "test"},
 		Listeners: []config.Listener{{
 			Name: "rapid", Protocol: "tcp", Listen: ":9990", Forward: backend.Addr().String(),
 		}},
@@ -185,7 +185,7 @@ func TestListenerManagerConcurrentConnections(t *testing.T) {
 	backend := startEchoServer(t)
 
 	cfg := &config.Config{
-		Tailscale: config.TailscaleConfig{Hostname: "test"},
+		Tailscale: config.TailscaleConfig{Service: "test"},
 		Listeners: []config.Listener{{
 			Name: "concurrent", Protocol: "tcp", Listen: ":9991", Forward: backend.Addr().String(),
 		}},
@@ -278,7 +278,7 @@ func TestListenerManagerSlowIdentityResolution(t *testing.T) {
 	backend := startEchoServer(t)
 
 	cfg := &config.Config{
-		Tailscale: config.TailscaleConfig{Hostname: "test"},
+		Tailscale: config.TailscaleConfig{Service: "test"},
 		Listeners: []config.Listener{{
 			Name: "slow", Protocol: "tcp", Listen: ":9992", Forward: backend.Addr().String(),
 		}},
@@ -340,7 +340,7 @@ func TestListenerManagerContextCancellationDuringServe(t *testing.T) {
 	backend := startEchoServer(t)
 
 	cfg := &config.Config{
-		Tailscale: config.TailscaleConfig{Hostname: "test"},
+		Tailscale: config.TailscaleConfig{Service: "test"},
 		Listeners: []config.Listener{{
 			Name: "canceltest", Protocol: "tcp", Listen: ":9993", Forward: backend.Addr().String(),
 		}},
@@ -409,7 +409,7 @@ func TestListenerManagerDeny(t *testing.T) {
 	backend := startEchoServer(t)
 
 	cfg := &config.Config{
-		Tailscale: config.TailscaleConfig{Hostname: "test"},
+		Tailscale: config.TailscaleConfig{Service: "test"},
 		Listeners: []config.Listener{
 			{
 				Name:     "restricted",

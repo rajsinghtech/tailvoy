@@ -13,7 +13,7 @@ import (
 
 func TestGenerateStandaloneConfig(t *testing.T) {
 	cfg := &config.Config{
-		Tailscale: config.TailscaleConfig{Hostname: "test"},
+		Tailscale: config.TailscaleConfig{Service: "test"},
 		Listeners: []config.Listener{
 			{
 				Name:     "web",
@@ -74,7 +74,7 @@ func TestGenerateStandaloneConfig(t *testing.T) {
 
 func TestGenerateStandaloneConfigOnlyL7(t *testing.T) {
 	cfg := &config.Config{
-		Tailscale: config.TailscaleConfig{Hostname: "test"},
+		Tailscale: config.TailscaleConfig{Service: "test"},
 		Listeners: []config.Listener{
 			{Name: "api", Protocol: "tcp", Listen: ":443", Forward: "127.0.0.1:8443", L7Policy: true},
 			{Name: "web", Protocol: "tcp", Listen: ":8080", Forward: "127.0.0.1:80", L7Policy: true},
@@ -139,7 +139,7 @@ func TestGenerateStandaloneConfigOnlyL7(t *testing.T) {
 
 func TestGenerateStandaloneConfigOnlyL4(t *testing.T) {
 	cfg := &config.Config{
-		Tailscale: config.TailscaleConfig{Hostname: "test"},
+		Tailscale: config.TailscaleConfig{Service: "test"},
 		Listeners: []config.Listener{
 			{Name: "pg", Protocol: "tcp", Listen: ":5432", Forward: "127.0.0.1:5432", L7Policy: false},
 			{Name: "redis", Protocol: "tcp", Listen: ":6379", Forward: "127.0.0.1:6379", L7Policy: false},
@@ -202,7 +202,7 @@ func TestGenerateStandaloneConfigOnlyL4(t *testing.T) {
 
 func TestGenerateStandaloneConfigMixed(t *testing.T) {
 	cfg := &config.Config{
-		Tailscale: config.TailscaleConfig{Hostname: "test"},
+		Tailscale: config.TailscaleConfig{Service: "test"},
 		Listeners: []config.Listener{
 			{Name: "web", Protocol: "tcp", Listen: ":443", Forward: "127.0.0.1:8443", L7Policy: true},
 			{Name: "db", Protocol: "tcp", Listen: ":5432", Forward: "127.0.0.1:5432", L7Policy: false},
@@ -236,7 +236,7 @@ func TestGenerateStandaloneConfigMixed(t *testing.T) {
 
 func TestGenerateStandaloneConfigManyListeners(t *testing.T) {
 	cfg := &config.Config{
-		Tailscale: config.TailscaleConfig{Hostname: "test"},
+		Tailscale: config.TailscaleConfig{Service: "test"},
 		Listeners: []config.Listener{
 			{Name: "l1", Protocol: "tcp", Listen: ":8001", Forward: "127.0.0.1:9001", L7Policy: true},
 			{Name: "l2", Protocol: "tcp", Listen: ":8002", Forward: "127.0.0.1:9002", L7Policy: false},
@@ -280,7 +280,7 @@ func TestGenerateStandaloneConfigManyListeners(t *testing.T) {
 
 func TestGenerateStandaloneConfigExtAuthzCluster(t *testing.T) {
 	cfg := &config.Config{
-		Tailscale: config.TailscaleConfig{Hostname: "test"},
+		Tailscale: config.TailscaleConfig{Service: "test"},
 		Listeners: []config.Listener{
 			{Name: "web", Protocol: "tcp", Listen: ":80", Forward: "127.0.0.1:8080", L7Policy: true},
 		},
@@ -329,7 +329,7 @@ func TestGenerateStandaloneConfigExtAuthzCluster(t *testing.T) {
 
 func TestGenerateStandaloneConfigHTTPListenerHasProxyProtocol(t *testing.T) {
 	cfg := &config.Config{
-		Tailscale: config.TailscaleConfig{Hostname: "test"},
+		Tailscale: config.TailscaleConfig{Service: "test"},
 		Listeners: []config.Listener{
 			{Name: "web", Protocol: "tcp", Listen: ":80", Forward: "127.0.0.1:8080", L7Policy: true},
 		},
@@ -362,7 +362,7 @@ func TestGenerateStandaloneConfigHTTPListenerHasProxyProtocol(t *testing.T) {
 
 func TestGenerateStandaloneConfigHTTPListenerHasExtAuthzGRPCFilter(t *testing.T) {
 	cfg := &config.Config{
-		Tailscale: config.TailscaleConfig{Hostname: "test"},
+		Tailscale: config.TailscaleConfig{Service: "test"},
 		Listeners: []config.Listener{
 			{Name: "mylistener", Protocol: "tcp", Listen: ":80", Forward: "127.0.0.1:8080", L7Policy: true},
 		},
@@ -447,7 +447,7 @@ func TestGenerateStandaloneConfigHTTPListenerHasExtAuthzGRPCFilter(t *testing.T)
 
 func TestGenerateStandaloneConfigExtAuthzClusterHasHTTP2(t *testing.T) {
 	cfg := &config.Config{
-		Tailscale: config.TailscaleConfig{Hostname: "test"},
+		Tailscale: config.TailscaleConfig{Service: "test"},
 		Listeners: []config.Listener{
 			{Name: "web", Protocol: "tcp", Listen: ":80", Forward: "127.0.0.1:8080", L7Policy: true},
 		},
@@ -501,7 +501,7 @@ func TestGenerateStandaloneConfigExtAuthzClusterHasHTTP2(t *testing.T) {
 
 func TestGenerateStandaloneConfigYAMLRoundTrip(t *testing.T) {
 	cfg := &config.Config{
-		Tailscale: config.TailscaleConfig{Hostname: "test"},
+		Tailscale: config.TailscaleConfig{Service: "test"},
 		Listeners: []config.Listener{
 			{Name: "web", Protocol: "tcp", Listen: ":443", Forward: "127.0.0.1:8443", L7Policy: true},
 			{Name: "db", Protocol: "tcp", Listen: ":5432", Forward: "127.0.0.1:5432", L7Policy: false},
@@ -533,7 +533,7 @@ func TestGenerateStandaloneConfigYAMLRoundTrip(t *testing.T) {
 
 func TestGenerateStandaloneConfigPort0(t *testing.T) {
 	cfg := &config.Config{
-		Tailscale: config.TailscaleConfig{Hostname: "test"},
+		Tailscale: config.TailscaleConfig{Service: "test"},
 		Listeners: []config.Listener{
 			{Name: "ephemeral", Protocol: "tcp", Listen: ":0", Forward: "127.0.0.1:8080", L7Policy: true},
 		},
@@ -563,7 +563,7 @@ func TestGenerateStandaloneConfigPort0(t *testing.T) {
 
 func TestGenerateStandaloneConfigNoListeners(t *testing.T) {
 	cfg := &config.Config{
-		Tailscale: config.TailscaleConfig{Hostname: "test"},
+		Tailscale: config.TailscaleConfig{Service: "test"},
 		Listeners: []config.Listener{},
 	}
 

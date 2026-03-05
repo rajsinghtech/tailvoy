@@ -84,9 +84,9 @@ echo "=== Waiting for tailnet join ==="
 IP=""
 for i in $(seq 1 60); do
     IP=$(tailscale status --json 2>/dev/null \
-        | jq -r '.Peer[] | select(.HostName == "tailvoy-docker-test") | .TailscaleIPs[0]' 2>/dev/null || true)
+        | jq -r '.Peer[] | select(.HostName == "tailvoy-docker-test-tailvoy") | .TailscaleIPs[0]' 2>/dev/null || true)
     if [ -n "$IP" ] && [ "$IP" != "null" ]; then
-        echo "tailvoy-docker-test joined as $IP"
+        echo "tailvoy-docker-test-tailvoy joined as $IP"
         break
     fi
     sleep 2

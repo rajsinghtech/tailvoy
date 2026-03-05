@@ -30,7 +30,7 @@ type tsnetAdapter struct {
 }
 
 func (a *tsnetAdapter) ListenTCPService(name string, port uint16) (net.Listener, error) {
-	return a.Server.ListenService(name, tsnet.ServiceModeTCP{Port: port})
+	return a.ListenService(name, tsnet.ServiceModeTCP{Port: port})
 }
 
 func main() {
@@ -79,8 +79,9 @@ func run(args []string) error {
 	defer cancel()
 
 	// Build Tailscale API client for VIP service management.
+	// Tailnet is always "-" (current tailnet) since we auth via OAuth.
 	tsClient := &tailscale.Client{
-		Tailnet: cfg.Tailscale.Tailnet,
+		Tailnet: "-",
 		Auth: &tailscale.OAuth{
 			ClientID:     cfg.Tailscale.ClientID,
 			ClientSecret: cfg.Tailscale.ClientSecret,
@@ -248,12 +249,6 @@ func run(args []string) error {
 			}()
 		}
 
-		// Delete VIP service on shutdown.
-		defer func() {
-			if err := svcMgr.Delete(context.Background()); err != nil {
-				logger.Error("failed to delete VIP service on shutdown", "err", err)
-			}
-		}()
 	}
 
 	// Start envoy if args are present.

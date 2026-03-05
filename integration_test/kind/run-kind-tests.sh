@@ -111,7 +111,6 @@ if [ -z "${TS_CLIENT_SECRET:-}" ]; then
     echo "FATAL: TS_CLIENT_SECRET is empty"
     exit 1
 fi
-TS_TAILNET="${TS_TAILNET:--}"
 
 # --- Create kind cluster ---
 echo "=== Creating kind cluster ==="

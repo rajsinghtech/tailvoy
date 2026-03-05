@@ -18,7 +18,6 @@ services:
     environment:
       - TS_CLIENT_ID=${TS_CLIENT_ID}
       - TS_CLIENT_SECRET=${TS_CLIENT_SECRET}
-      - TS_TAILNET=${TS_TAILNET:--}
     command:
       - "--policy"
       - "/policy.yaml"

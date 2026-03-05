@@ -1,6 +1,5 @@
 tailscale:
   hostname: "tailvoy-l4-test"
-  tailnet: "${TS_TAILNET}"
   clientId: "${TS_CLIENT_ID}"
   clientSecret: "${TS_CLIENT_SECRET}"
   tags:

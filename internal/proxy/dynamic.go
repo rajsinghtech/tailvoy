@@ -166,6 +166,7 @@ func (dm *DynamicListenerManager) startListener(parentCtx context.Context, l con
 }
 
 // StopAll cancels all active dynamic listeners.
+// The VIP service is intentionally NOT deleted — multiple replicas may share it.
 func (dm *DynamicListenerManager) StopAll() {
 	dm.mu.Lock()
 	defer dm.mu.Unlock()
@@ -174,10 +175,4 @@ func (dm *DynamicListenerManager) StopAll() {
 		dl.cancel()
 	}
 	dm.active = make(map[string]*dynamicListener)
-
-	if dm.svcMgr != nil {
-		if err := dm.svcMgr.Delete(context.Background()); err != nil {
-			dm.logger.Error("failed to delete VIP service on shutdown", "err", err)
-		}
-	}
 }

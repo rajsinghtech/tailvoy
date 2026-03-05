@@ -17,7 +17,6 @@ func testdataPath(name string) string {
 func oauthBlock(hostname string) string {
 	return fmt.Sprintf(`tailscale:
   hostname: %q
-  tailnet: "test.ts.net"
   clientId: "client-id"
   clientSecret: "client-secret"
   tags:
@@ -38,9 +37,6 @@ func TestLoadFromFile(t *testing.T) {
 
 	if cfg.Tailscale.Hostname != "tailvoy-test" {
 		t.Errorf("hostname = %q, want %q", cfg.Tailscale.Hostname, "tailvoy-test")
-	}
-	if cfg.Tailscale.Tailnet != "test.ts.net" {
-		t.Errorf("tailnet = %q, want %q", cfg.Tailscale.Tailnet, "test.ts.net")
 	}
 	if cfg.Tailscale.ClientID != "test-client-id" {
 		t.Errorf("clientId = %q, want %q", cfg.Tailscale.ClientID, "test-client-id")
@@ -90,7 +86,6 @@ func TestValidationErrors(t *testing.T) {
 			name: "missing hostname",
 			yaml: `
 tailscale:
-  tailnet: "t.ts.net"
   clientId: "id"
   clientSecret: "secret"
   tags: ["tag:x"]
@@ -281,8 +276,8 @@ tailscale:
 	if err == nil {
 		t.Fatal("expected error for missing required OAuth fields")
 	}
-	if !strings.Contains(err.Error(), "tailnet is required") {
-		t.Errorf("error = %q, want substring about tailnet", err.Error())
+	if !strings.Contains(err.Error(), "clientId is required") {
+		t.Errorf("error = %q, want substring about clientId", err.Error())
 	}
 }
 
@@ -310,7 +305,6 @@ func TestEnvVarExpansion_NestedSyntax(t *testing.T) {
 	data := []byte(`
 tailscale:
   hostname: "test-${INNER}"
-  tailnet: "test.ts.net"
   clientId: "id"
   clientSecret: "secret"
   tags:
@@ -339,7 +333,6 @@ func TestEnvVarExpansion_MultipleVars(t *testing.T) {
 	data := []byte(`
 tailscale:
   hostname: "${HOST}"
-  tailnet: "test.ts.net"
   clientId: "id"
   clientSecret: "secret"
   tags:
@@ -389,7 +382,6 @@ func TestParse_OAuthConfig(t *testing.T) {
 	data := []byte(`
 tailscale:
   hostname: "my-proxy"
-  tailnet: "example.ts.net"
   clientId: "${TS_CID}"
   clientSecret: "${TS_CSEC}"
   tags:
@@ -432,7 +424,6 @@ func TestParse_ServiceNameExplicit(t *testing.T) {
 tailscale:
   hostname: "my-proxy"
   service: "custom-svc"
-  tailnet: "test.ts.net"
   clientId: "id"
   clientSecret: "secret"
   tags:
@@ -449,29 +440,10 @@ tailscale:
 	}
 }
 
-func TestValidation_MissingTailnet(t *testing.T) {
-	data := []byte(`
-tailscale:
-  hostname: "test"
-  clientId: "id"
-  clientSecret: "secret"
-  tags: ["tag:x"]
-  serviceTags: ["tag:y"]
-`)
-	_, err := Parse(data)
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if !strings.Contains(err.Error(), "tailscale.tailnet is required") {
-		t.Errorf("error = %q", err)
-	}
-}
-
 func TestValidation_MissingClientId(t *testing.T) {
 	data := []byte(`
 tailscale:
   hostname: "test"
-  tailnet: "t.ts.net"
   clientSecret: "secret"
   tags: ["tag:x"]
   serviceTags: ["tag:y"]
@@ -489,7 +461,6 @@ func TestValidation_MissingClientSecret(t *testing.T) {
 	data := []byte(`
 tailscale:
   hostname: "test"
-  tailnet: "t.ts.net"
   clientId: "id"
   tags: ["tag:x"]
   serviceTags: ["tag:y"]
@@ -507,7 +478,6 @@ func TestValidation_MissingTags(t *testing.T) {
 	data := []byte(`
 tailscale:
   hostname: "test"
-  tailnet: "t.ts.net"
   clientId: "id"
   clientSecret: "secret"
   serviceTags: ["tag:y"]
@@ -525,7 +495,6 @@ func TestValidation_MissingServiceTags(t *testing.T) {
 	data := []byte(`
 tailscale:
   hostname: "test"
-  tailnet: "t.ts.net"
   clientId: "id"
   clientSecret: "secret"
   tags: ["tag:x"]

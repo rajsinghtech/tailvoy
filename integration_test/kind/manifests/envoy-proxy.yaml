@@ -38,8 +38,6 @@ spec:
                             secretKeyRef:
                               name: tailvoy-oauth
                               key: TS_CLIENT_SECRET
-                        - name: TS_TAILNET
-                          value: "-"
                       ports:
                         - containerPort: 9001
                           name: authz

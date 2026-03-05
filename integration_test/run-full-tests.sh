@@ -71,7 +71,6 @@ if [ -z "${TS_CLIENT_ID:-}" ] || [ -z "${TS_CLIENT_SECRET:-}" ]; then
 fi
 if [ -z "${TS_CLIENT_ID:-}" ]; then echo "FATAL: TS_CLIENT_ID is empty"; exit 1; fi
 if [ -z "${TS_CLIENT_SECRET:-}" ]; then echo "FATAL: TS_CLIENT_SECRET is empty"; exit 1; fi
-export TS_TAILNET="${TS_TAILNET:--}"
 
 # --- Build and start ---
 echo "=== Building Docker images ==="

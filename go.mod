@@ -9,10 +9,8 @@ require (
 	google.golang.org/grpc v1.79.1
 	gopkg.in/yaml.v3 v3.0.1
 	tailscale.com v1.94.2
-	tailscale.com/client/tailscale/v2 v2.8.0
+	tailscale.com/client/tailscale/v2 v2.8.1-0.20260305000327-8b59c2c04425
 )
-
-replace tailscale.com/client/tailscale/v2 => /Users/rajsingh/Documents/GitHub/tailscale-client-go-v2
 
 require (
 	filippo.io/edwards25519 v1.1.0 // indirect

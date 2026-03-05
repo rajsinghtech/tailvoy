@@ -7,7 +7,6 @@
 
 tailscale:
   hostname: "tailvoy-gw"
-  tailnet: "${TS_TAILNET}"
   clientId: "${TS_CLIENT_ID}"
   clientSecret: "${TS_CLIENT_SECRET}"
   tags:

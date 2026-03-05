@@ -36,7 +36,6 @@ func (d *DiscoveryConfig) ParsedPollInterval() time.Duration {
 type TailscaleConfig struct {
 	Hostname     string   `yaml:"hostname"`
 	Service      string   `yaml:"service"`
-	Tailnet      string   `yaml:"tailnet"`
 	ClientID     string   `yaml:"clientId"`
 	ClientSecret string   `yaml:"clientSecret"`
 	Tags         []string `yaml:"tags"`
@@ -97,9 +96,6 @@ func expandEnvVars(s string) string {
 func (c *Config) validate() error {
 	if c.Tailscale.Hostname == "" {
 		return fmt.Errorf("tailscale.hostname is required")
-	}
-	if c.Tailscale.Tailnet == "" {
-		return fmt.Errorf("tailscale.tailnet is required")
 	}
 	if c.Tailscale.ClientID == "" {
 		return fmt.Errorf("tailscale.clientId is required")

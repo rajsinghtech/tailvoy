@@ -100,7 +100,9 @@ func (lm *ListenerManager) handleConn(ctx context.Context, conn net.Conn, listen
 		conn = &readerConn{Conn: conn, reader: reader}
 	}
 
-	if !lm.engine.HasAccess(listenerCfg.Name, sni, id) {
+	// L7 listeners delegate access control to ext_authz at the HTTP layer.
+	// Only enforce L4 policy for non-L7 (pure TCP/TLS passthrough) listeners.
+	if !listenerCfg.L7Policy && !lm.engine.HasAccess(listenerCfg.Name, sni, id) {
 		lm.logger.Info("connection denied by L4 policy",
 			"listener", listenerCfg.Name,
 			"remote", remoteAddr,

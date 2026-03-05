@@ -31,6 +31,14 @@ func (m *Manager) Ensure(ctx context.Context, ports []string) error {
 		Ports:   ports,
 		Comment: "Managed by Tailvoy",
 	}
+
+	// When updating an existing service, the API requires addrs to be included.
+	// Fetch existing service to preserve allocated addresses.
+	existing, err := m.client.VIPServices().Get(ctx, m.serviceName)
+	if err == nil && len(existing.Addrs) > 0 {
+		svc.Addrs = existing.Addrs
+	}
+
 	m.logger.Info("ensuring VIP service", "name", m.serviceName, "ports", ports, "tags", m.serviceTags)
 	if err := m.client.VIPServices().CreateOrUpdate(ctx, svc); err != nil {
 		return fmt.Errorf("create/update VIP service %s: %w", m.serviceName, err)

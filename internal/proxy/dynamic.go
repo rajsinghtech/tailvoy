@@ -148,17 +148,32 @@ func (dm *DynamicListenerManager) startListener(parentCtx context.Context, l con
 			cancel()
 			return fmt.Errorf("invalid port for %s: %w", l.Name, err)
 		}
-		ln, err := dm.ts.ListenTCPService(dm.svcName, uint16(port))
+
+		// VIP service listener — reachable via the service's virtual IP.
+		svcLn, err := dm.ts.ListenTCPService(dm.svcName, uint16(port))
 		if err != nil {
 			cancel()
 			return fmt.Errorf("listen service tcp %s: %w", l.Name, err)
 		}
 		dm.logger.Info("service listener started", "name", l.Name, "service", dm.svcName, "port", port)
 		go func() {
-			if err := dm.listenerMgr.Serve(lctx, ln, &cfg); err != nil {
+			if err := dm.listenerMgr.Serve(lctx, svcLn, &cfg); err != nil {
 				dm.logger.Debug("service listener ended", "name", cfg.Name, "err", err)
 			}
 		}()
+
+		// Node IP listener — reachable via the node's direct tailscale IP.
+		nodeLn, err := dm.ts.Listen("tcp", ":"+l.Port())
+		if err != nil {
+			dm.logger.Warn("node listener failed, VIP-only", "name", l.Name, "port", port, "err", err)
+		} else {
+			dm.logger.Info("node listener started", "name", l.Name, "port", port)
+			go func() {
+				if err := dm.listenerMgr.Serve(lctx, nodeLn, &cfg); err != nil {
+					dm.logger.Debug("node listener ended", "name", cfg.Name, "err", err)
+				}
+			}()
+		}
 	}
 
 	dm.active[l.Name] = &dynamicListener{cfg: l, cancel: cancel}

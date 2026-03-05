@@ -36,9 +36,10 @@ type activeState struct {
 }
 
 type listenerConfig struct {
-	Name         string        `json:"name"`
-	Address      addressWrap   `json:"address"`
-	FilterChains []filterChain `json:"filter_chains"`
+	Name               string        `json:"name"`
+	Address            addressWrap   `json:"address"`
+	FilterChains       []filterChain `json:"filter_chains"`
+	DefaultFilterChain *filterChain  `json:"default_filter_chain"`
 }
 
 type addressWrap struct {
@@ -164,7 +165,11 @@ func (d *Discoverer) parse(body []byte) ([]config.Listener, error) {
 			protocol = "udp"
 		}
 
-		l7 := d.hasHTTPConnectionManager(lc.FilterChains)
+		allChains := lc.FilterChains
+		if lc.DefaultFilterChain != nil {
+			allChains = append(allChains, *lc.DefaultFilterChain)
+		}
+		l7 := d.hasHTTPConnectionManager(allChains)
 
 		listeners = append(listeners, config.Listener{
 			Name:          name,

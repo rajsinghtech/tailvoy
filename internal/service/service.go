@@ -25,10 +25,18 @@ func New(client *tailscale.Client, svcName string, tags []string, logger *slog.L
 }
 
 func (m *Manager) Ensure(ctx context.Context, ports []string) error {
+	// ListenService advertises ports as "tcp:port", so the VIP service
+	// definition must use the same format for the coordination server
+	// to match them.
+	tcpPorts := make([]string, len(ports))
+	for i, p := range ports {
+		tcpPorts[i] = "tcp:" + p
+	}
+
 	svc := tailscale.VIPService{
 		Name:    m.serviceName,
 		Tags:    m.serviceTags,
-		Ports:   ports,
+		Ports:   tcpPorts,
 		Comment: "Managed by Tailvoy",
 	}
 

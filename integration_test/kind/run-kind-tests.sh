@@ -283,11 +283,11 @@ assert_http "HTTP: GET /public/nested/path allow" "http://$IP:8080/public/nested
 # Allow: exact match /health
 assert_http "HTTP: GET /health allow" "http://$IP:8080/health" "200"
 
-# Allow: prefix match /api/*
-assert_http "HTTP: GET /api/data allow" "http://$IP:8080/api/data" "200"
-assert_http "HTTP: GET /api/v1/users allow" "http://$IP:8080/api/v1/users" "200"
+# Deny: /api/* without hostname — only allowed for public.tailvoy.test
+assert_http "HTTP: GET /api/data deny (hostname-restricted)" "http://$IP:8080/api/data" "403"
+assert_http "HTTP: GET /api/v1/users deny (hostname-restricted)" "http://$IP:8080/api/v1/users" "403"
 
-# Allow: prefix match /admin/*
+# Deny: /admin/* not in any cap route
 assert_http "HTTP: GET /admin/settings deny (not in caps)" "http://$IP:8080/admin/settings" "403"
 
 # Deny: root path not in cap routes
@@ -399,23 +399,13 @@ echo "========================================"
 echo "  UDPRoute TESTS"
 echo "========================================"
 
-# Cap rule: {"listeners": ["tcp", "udp", "tls"]} — "udp" in listeners = L4 access.
-# Keep stdin open with sleep so ncat waits for the response before exiting.
+# Discovery mode skips UDP entirely — no UDP listener is created.
+# Verify no response (connection should fail/timeout).
 UDP_RESP=$({ echo -n "hello"; sleep 3; } | $NC_CMD -u -w 5 "$IP" 8053 2>/dev/null || true)
 if echo "$UDP_RESP" | grep -q "echo: hello"; then
-    test_pass "UDP: echo allow (cap grants L4 access)"
+    test_fail "UDP: no listener in discovery mode" "got unexpected response '$UDP_RESP'"
 else
-    # Try alternate approach with socat if available
-    if command -v socat &>/dev/null; then
-        UDP_RESP2=$(echo -n "hello" | socat -T5 - UDP:"$IP":8053 2>/dev/null || true)
-    else
-        UDP_RESP2=$(bash -c "exec 3<>/dev/udp/$IP/8053; echo -n 'hello' >&3; read -t 5 resp <&3; echo \"\$resp\"" 2>/dev/null || true)
-    fi
-    if echo "$UDP_RESP2" | grep -q "echo: hello"; then
-        test_pass "UDP: echo allow (cap grants L4 access)"
-    else
-        test_fail "UDP: echo allow (cap grants L4 access)" "ncat='$UDP_RESP', fallback='$UDP_RESP2'"
-    fi
+    test_pass "UDP: no listener in discovery mode"
 fi
 
 # =====================================================

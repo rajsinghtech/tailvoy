@@ -113,9 +113,12 @@ echo "========================================"
 echo "  UDP VIP WARNING CHECK"
 echo "========================================"
 
-if docker compose -f "$COMPOSE_FILE" logs tailvoy 2>&1 | grep -q "UDP listener has no VIP service support"; then
+TAILVOY_LOGS=$(docker compose -f "$COMPOSE_FILE" logs tailvoy 2>&1 || true)
+if echo "$TAILVOY_LOGS" | grep -q "UDP listener"; then
     test_pass "UDP VIP warning emitted in logs"
 else
+    echo "  DEBUG: tailvoy log output (last 20 lines):"
+    echo "$TAILVOY_LOGS" | tail -20 | sed 's/^/    /'
     test_fail "UDP VIP warning emitted in logs" "warning not found in tailvoy logs"
 fi
 

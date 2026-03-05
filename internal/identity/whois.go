@@ -8,6 +8,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/singleflight"
+
 	"tailscale.com/client/tailscale/apitype"
 	"tailscale.com/tailcfg"
 
@@ -52,6 +54,7 @@ type Resolver struct {
 	client WhoIsClient
 	mu     sync.RWMutex
 	cache  map[netip.Addr]*cacheEntry
+	flight singleflight.Group
 	now    func() time.Time // for testing
 	done   chan struct{}
 }
@@ -113,21 +116,28 @@ func (r *Resolver) Resolve(ctx context.Context, remoteAddr string) (*policy.Iden
 	}
 	r.mu.RUnlock()
 
-	resp, err := r.client.WhoIs(ctx, remoteAddr)
+	// Use singleflight to collapse concurrent lookups for the same IP.
+	v, err, _ := r.flight.Do(ip.String(), func() (interface{}, error) {
+		resp, err := r.client.WhoIs(ctx, remoteAddr)
+		if err != nil {
+			return nil, &ResolveError{Addr: remoteAddr, Reason: err.Error()}
+		}
+
+		id := toIdentity(resp, ip)
+
+		r.mu.Lock()
+		r.cache[ip] = &cacheEntry{
+			identity:  id,
+			expiresAt: r.now().Add(cacheTTL),
+		}
+		r.mu.Unlock()
+
+		return id, nil
+	})
 	if err != nil {
-		return nil, &ResolveError{Addr: remoteAddr, Reason: err.Error()}
+		return nil, err
 	}
-
-	id := toIdentity(resp, ip)
-
-	r.mu.Lock()
-	r.cache[ip] = &cacheEntry{
-		identity:  id,
-		expiresAt: r.now().Add(cacheTTL),
-	}
-	r.mu.Unlock()
-
-	return id, nil
+	return v.(*policy.Identity), nil
 }
 
 // CachedIdentity returns the cached identity for the given address, or nil if

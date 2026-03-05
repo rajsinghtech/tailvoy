@@ -1,21 +1,18 @@
 tailscale:
-  service: "tailvoy-integration-test"
-  clientId: "${TS_CLIENT_ID}"
-  clientSecret: "${TS_CLIENT_SECRET}"
+  service: tailvoy-integration-test
   tags:
-    - "tag:integration"
+    - tag:integration
   serviceTags:
-    - "tag:integration"
+    - tag:integration
 
 listeners:
-  - name: web
-    protocol: tcp
-    listen: ":80"
-    forward: "127.0.0.1:8080"
-    l7_policy: true
+  web:
+    port: 80
+    protocol: http
+    routes:
+      - backend: 127.0.0.1:8080
 
-  - name: restricted-port
+  restricted-port:
+    port: 9999
     protocol: tcp
-    listen: ":9999"
-    forward: "127.0.0.1:8080"
-    l7_policy: false
+    backend: 127.0.0.1:8080

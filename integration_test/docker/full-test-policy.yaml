@@ -1,0 +1,47 @@
+tailscale:
+  service: tailvoy-docker-test
+  tags:
+    - tag:docker
+  serviceTags:
+    - tag:docker
+
+listeners:
+  http:
+    port: 80
+    protocol: http
+    routes:
+      - hostname: app.tailvoy.test
+        backend: backend:8080
+      - hostname: api.tailvoy.test
+        paths:
+          /v1/*: backend:8080
+          /v2/*: backend-alt:8081
+      - backend: backend:8080
+
+  grpc:
+    port: 50051
+    protocol: grpc
+    routes:
+      - backend: grpc-echo:50051
+
+  tls:
+    port: 8443
+    protocol: tls
+    routes:
+      - hostname: secure.tailvoy.test
+        backend: tls-echo:8443
+
+  tcp:
+    port: 5432
+    protocol: tcp
+    backend: tcp-echo:9000
+
+  udp:
+    port: 9053
+    protocol: udp
+    backend: udp-echo:9053
+
+  no-access:
+    port: 9999
+    protocol: tcp
+    backend: backend:8080

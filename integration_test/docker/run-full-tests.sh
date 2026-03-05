@@ -29,8 +29,9 @@ test_fail() {
 
 assert_http() {
     local desc="$1" url="$2" expected="$3"
+    shift 3
     local actual
-    actual=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 10 "$url" 2>&1 || true)
+    actual=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 10 "$@" "$url" 2>&1 || true)
     if [ "$actual" = "$expected" ]; then
         test_pass "$desc"
     else
@@ -40,13 +41,14 @@ assert_http() {
 
 assert_body_field() {
     local desc="$1" url="$2" field="$3" expected="$4"
+    shift 4
     local body actual
-    body=$(curl -sf --max-time 10 "$url" 2>&1 || true)
+    body=$(curl -sf --max-time 10 "$@" "$url" 2>&1 || true)
     actual=$(echo "$body" | jq -r ".$field" 2>/dev/null || true)
     if [ "$actual" = "$expected" ]; then
         test_pass "$desc"
     else
-        test_fail "$desc" "expected $field=$expected, got $actual"
+        test_fail "$desc" "expected $field=$expected, got $actual (body: $body)"
     fi
 }
 
@@ -62,7 +64,9 @@ fi
 
 # --- Load env ---
 if [ -z "${TS_CLIENT_ID:-}" ] || [ -z "${TS_CLIENT_SECRET:-}" ]; then
-    if [ -f "$SCRIPT_DIR/.env" ]; then
+    if [ -f "$SCRIPT_DIR/../.env" ]; then
+        export $(grep -v '^#' "$SCRIPT_DIR/../.env" | xargs)
+    elif [ -f "$SCRIPT_DIR/.env" ]; then
         export $(grep -v '^#' "$SCRIPT_DIR/.env" | xargs)
     else
         echo "FATAL: TS_CLIENT_ID/TS_CLIENT_SECRET not set and no .env file found"
@@ -123,11 +127,11 @@ else
 fi
 
 # =====================================================
-# HTTP L7 TESTS (port 80, through Envoy ext_authz)
+# HTTP L7 TESTS — path routing (port 80)
 # =====================================================
 echo ""
 echo "========================================"
-echo "  HTTP L7 TESTS"
+echo "  HTTP L7 TESTS — PATH ROUTING"
 echo "========================================"
 
 # Allow: /public/* prefix
@@ -141,7 +145,7 @@ assert_http "L7: /health allow (exact)" "http://$IP:80/health" "200"
 assert_http "L7: /api/data allow" "http://$IP:80/api/data" "200"
 assert_http "L7: /api/v1/users allow" "http://$IP:80/api/v1/users" "200"
 
-# Allow: /admin/* prefix
+# Deny: /admin/* (not in cap routes)
 assert_http "L7: /admin/settings deny (not in caps)" "http://$IP:80/admin/settings" "403"
 
 # Deny: / root (not in cap routes)
@@ -158,6 +162,43 @@ assert_http "L7: /health/ deny (exact boundary)" "http://$IP:80/health/" "403"
 
 # Deny: /apiary (not /api/*)
 assert_http "L7: /apiary deny (not /api/*)" "http://$IP:80/apiary" "403"
+
+# =====================================================
+# HTTP L7 TESTS — hostname routing
+# =====================================================
+echo ""
+echo "========================================"
+echo "  HTTP L7 TESTS — HOSTNAME ROUTING"
+echo "========================================"
+
+# app.tailvoy.test: grant gives /* for this hostname
+assert_http "L7: app.tailvoy.test /anything allow" "http://$IP:80/anything" "200" -H "Host: app.tailvoy.test"
+assert_http "L7: app.tailvoy.test / allow" "http://$IP:80/" "200" -H "Host: app.tailvoy.test"
+assert_http "L7: app.tailvoy.test /admin allow" "http://$IP:80/admin" "200" -H "Host: app.tailvoy.test"
+
+# api.tailvoy.test: grant gives /v1/* only
+assert_http "L7: api.tailvoy.test /v1/users allow" "http://$IP:80/v1/users" "200" -H "Host: api.tailvoy.test"
+assert_http "L7: api.tailvoy.test /v1/data allow" "http://$IP:80/v1/data" "200" -H "Host: api.tailvoy.test"
+assert_http "L7: api.tailvoy.test /v2/users deny" "http://$IP:80/v2/users" "403" -H "Host: api.tailvoy.test"
+# No route defined for / on this hostname, Envoy returns 404 (no matching route)
+assert_http "L7: api.tailvoy.test / no route" "http://$IP:80/" "404" -H "Host: api.tailvoy.test"
+
+# unknown.tailvoy.test: no hostname-specific grant, falls back to default route
+# The default route has no hostname restriction, so /public/* should work
+assert_http "L7: unknown host /public/hello allow (default route)" "http://$IP:80/public/hello" "200" -H "Host: unknown.tailvoy.test"
+assert_http "L7: unknown host /admin deny (default route)" "http://$IP:80/admin" "403" -H "Host: unknown.tailvoy.test"
+
+# =====================================================
+# HTTP L7 TESTS — multi-path routing (different backends)
+# =====================================================
+echo ""
+echo "========================================"
+echo "  HTTP L7 TESTS — MULTI-PATH ROUTING"
+echo "========================================"
+
+# api.tailvoy.test routes /v1/* to backend:8080, /v2/* to backend-alt:8081
+# The backend echo servers return the path they received
+assert_body_field "L7: api.tailvoy.test /v1/test routed correctly" "http://$IP:80/v1/test" "path" "/v1/test" -H "Host: api.tailvoy.test"
 
 # =====================================================
 # IDENTITY HEADER TESTS (port 80)
@@ -191,6 +232,30 @@ if [ -n "$IP_HDR" ]; then
     test_pass "Header: x-tailscale-ip present"
 else
     test_fail "Header: x-tailscale-ip" "empty"
+fi
+
+# =====================================================
+# TLS PASSTHROUGH TESTS (port 8443, listener=tls)
+# =====================================================
+echo ""
+echo "========================================"
+echo "  TLS PASSTHROUGH TESTS"
+echo "========================================"
+
+# Allow: SNI secure.tailvoy.test (cap grants tls + hostname)
+TLS_RESP=$(curl -sk --max-time 10 --resolve "secure.tailvoy.test:8443:$IP" "https://secure.tailvoy.test:8443/" 2>&1 || true)
+if echo "$TLS_RESP" | jq -e '.tls == true' &>/dev/null; then
+    test_pass "TLS: passthrough to tls-echo (secure.tailvoy.test)"
+else
+    test_fail "TLS: passthrough to tls-echo" "got '$TLS_RESP'"
+fi
+
+# Deny: SNI unknown.tailvoy.test (hostname not in caps)
+TLS_DENY=$(curl -sk -o /dev/null -w "%{http_code}" --max-time 5 --resolve "unknown.tailvoy.test:8443:$IP" "https://unknown.tailvoy.test:8443/" 2>&1 || true)
+if [ "$TLS_DENY" = "000" ] || [ -z "$TLS_DENY" ]; then
+    test_pass "TLS: deny unknown hostname (conn reset)"
+else
+    test_fail "TLS: deny unknown hostname" "expected conn reset, got $TLS_DENY"
 fi
 
 # =====================================================
@@ -228,14 +293,56 @@ echo "  UDP TESTS"
 echo "========================================"
 
 if [ -n "$NC_CMD" ]; then
+    # Allow: udp listener is in caps
     UDP_RESP=$({ echo -n "hello"; sleep 3; } | $NC_CMD -u -w 5 "$IP" 9053 2>/dev/null || true)
     if echo "$UDP_RESP" | grep -q "echo: hello"; then
-        test_fail "UDP: deny (udp not in caps)" "got response, expected deny"
+        test_pass "UDP: echo allow (cap grants udp access)"
     else
-        test_pass "UDP: deny (udp not in caps)"
+        test_fail "UDP: echo allow (cap grants udp access)" "got '$UDP_RESP'"
     fi
 else
     echo "  SKIP: UDP tests (no ncat/nc)"
+fi
+
+# =====================================================
+# gRPC TESTS (port 50051, listener=grpc)
+# =====================================================
+echo ""
+echo "========================================"
+echo "  gRPC TESTS"
+echo "========================================"
+
+if command -v grpc-health-probe &>/dev/null; then
+    # Allow: health check (cap grants /grpc.health.v1.Health/*)
+    if grpc-health-probe -addr "$IP:50051" -connect-timeout 5s -rpc-timeout 5s 2>/dev/null; then
+        test_pass "gRPC: health check allow"
+    else
+        test_fail "gRPC: health check allow" "health probe failed"
+    fi
+
+    # Allow: named service health
+    if grpc-health-probe -addr "$IP:50051" -service echo -connect-timeout 5s -rpc-timeout 5s 2>/dev/null; then
+        test_pass "gRPC: named service health allow"
+    else
+        test_fail "gRPC: named service health allow" "health probe failed"
+    fi
+else
+    echo "  SKIP: gRPC health tests (grpc-health-probe not found)"
+fi
+
+if command -v grpcurl &>/dev/null; then
+    # Deny: reflection (not in cap routes)
+    GRPC_REFL=$(grpcurl -plaintext "$IP:50051" list 2>&1 || true)
+    if echo "$GRPC_REFL" | grep -qi "denied\|permission\|forbidden\|code = 7\|PermissionDenied"; then
+        test_pass "gRPC: reflection deny (not in cap routes)"
+    elif echo "$GRPC_REFL" | grep -qi "grpc.health"; then
+        test_fail "gRPC: reflection deny" "reflection succeeded, expected deny"
+    else
+        # Connection reset or other error also counts as deny
+        test_pass "gRPC: reflection deny (connection error)"
+    fi
+else
+    echo "  SKIP: gRPC reflection tests (grpcurl not found)"
 fi
 
 # =====================================================

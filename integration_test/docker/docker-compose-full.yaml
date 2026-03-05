@@ -1,19 +1,33 @@
 services:
   backend:
     build:
-      context: ./backend
+      context: ../backend
+
+  backend-alt:
+    build:
+      context: ../backend
+    environment:
+      - PORT=8081
 
   tcp-echo:
     build:
-      context: ./backend/tcp-echo
+      context: ../backend/tcp-echo
 
   udp-echo:
     build:
-      context: ./backend/udp-echo
+      context: ../backend/udp-echo
+
+  tls-echo:
+    build:
+      context: ../backend/tls-echo
+
+  grpc-echo:
+    build:
+      context: ../backend/grpc-echo
 
   tailvoy:
     build:
-      context: ..
+      context: ../..
       dockerfile: Dockerfile
     environment:
       - TS_CLIENT_ID=${TS_CLIENT_ID}
@@ -21,12 +35,14 @@ services:
     command:
       - "--config"
       - "/config.yaml"
-      - "--standalone"
       - "--log-level"
       - "debug"
     volumes:
       - ./full-test-policy.yaml:/config.yaml:ro
     depends_on:
       - backend
+      - backend-alt
       - tcp-echo
       - udp-echo
+      - tls-echo
+      - grpc-echo

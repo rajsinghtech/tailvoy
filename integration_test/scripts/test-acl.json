@@ -7,7 +7,9 @@
   "autoApprovers": {
     "services": {
       "svc:docker": ["tag:docker"],
-      "svc:kind": ["tag:kind"]
+      "svc:kind": ["tag:kind"],
+      "svc:tailvoy-docker-test": ["tag:docker"],
+      "svc:tailvoy-kind-test": ["tag:kind"]
     }
   },
   "grants": [
@@ -22,7 +24,12 @@
       "app": {
         "rajsingh.info/cap/tailvoy": [
           {"listeners": ["http"], "routes": ["/public/*", "/health", "/api/*"]},
-          {"listeners": ["tcp"]}
+          {"listeners": ["http"], "hostnames": ["app.tailvoy.test"], "routes": ["/*"]},
+          {"listeners": ["http"], "hostnames": ["api.tailvoy.test"], "routes": ["/v1/*"]},
+          {"listeners": ["tcp"]},
+          {"listeners": ["tls"], "hostnames": ["secure.tailvoy.test"]},
+          {"listeners": ["udp"]},
+          {"listeners": ["grpc"], "routes": ["/grpc.health.v1.Health/*"]}
         ]
       }
     },

@@ -41,7 +41,7 @@ func NewListenerManager(engine *policy.Engine, resolver *identity.Resolver, l4pr
 
 // Serve runs the accept loop on ln, spawning a goroutine per connection.
 // It returns when ctx is cancelled or the listener is closed.
-func (lm *ListenerManager) Serve(ctx context.Context, ln Acceptor, listenerCfg *config.Listener) error {
+func (lm *ListenerManager) Serve(ctx context.Context, ln Acceptor, listenerCfg *config.FlatListener) error {
 	var wg sync.WaitGroup
 	defer wg.Wait()
 
@@ -71,7 +71,7 @@ func (lm *ListenerManager) Serve(ctx context.Context, ln Acceptor, listenerCfg *
 
 // handleConn resolves the caller identity, checks L4 policy, and forwards
 // the connection if allowed.
-func (lm *ListenerManager) handleConn(ctx context.Context, conn net.Conn, listenerCfg *config.Listener) {
+func (lm *ListenerManager) handleConn(ctx context.Context, conn net.Conn, listenerCfg *config.FlatListener) {
 	defer conn.Close()
 
 	remoteAddr := conn.RemoteAddr().String()
@@ -86,9 +86,9 @@ func (lm *ListenerManager) handleConn(ctx context.Context, conn net.Conn, listen
 		return
 	}
 
-	// For non-L7 TCP listeners, peek TLS ClientHello for SNI.
+	// For TLS passthrough listeners, peek TLS ClientHello for SNI-based routing.
 	var sni string
-	if !listenerCfg.L7Policy && listenerCfg.Protocol == "tcp" {
+	if listenerCfg.SNIPassthrough {
 		var reader io.Reader
 		var peekErr error
 		sni, reader, peekErr = PeekSNI(conn)
@@ -104,7 +104,7 @@ func (lm *ListenerManager) handleConn(ctx context.Context, conn net.Conn, listen
 
 	// L7 listeners delegate access control to ext_authz at the HTTP layer.
 	// Only enforce L4 policy for non-L7 (pure TCP/TLS passthrough) listeners.
-	if !listenerCfg.L7Policy && !lm.engine.HasAccess(listenerCfg.Name, sni, id) {
+	if !listenerCfg.IsL7 && !lm.engine.HasAccess(listenerCfg.Name, sni, id) {
 		lm.logger.Info("connection denied by L4 policy",
 			"listener", listenerCfg.Name,
 			"remote", remoteAddr,
@@ -115,9 +115,24 @@ func (lm *ListenerManager) handleConn(ctx context.Context, conn net.Conn, listen
 		return
 	}
 
-	useProxyProto := listenerCfg.ProxyProtocol == "v2"
+	// Resolve the forward address. For SNI passthrough, look up the backend
+	// from routes based on the extracted SNI hostname.
+	forward := listenerCfg.Forward
+	if listenerCfg.SNIPassthrough && sni != "" {
+		for _, r := range listenerCfg.Routes {
+			if r.Hostname == sni {
+				forward = r.Backend
+				break
+			}
+		}
+		if forward == "" {
+			lm.logger.Debug("no backend for SNI",
+				"listener", listenerCfg.Name, "sni", sni)
+			return
+		}
+	}
 
-	if err := lm.l4proxy.Forward(ctx, conn, listenerCfg.Forward, conn.RemoteAddr(), useProxyProto); err != nil {
+	if err := lm.l4proxy.Forward(ctx, conn, forward, conn.RemoteAddr(), listenerCfg.ProxyProtocol); err != nil {
 		lm.logger.Debug("forward ended",
 			"listener", listenerCfg.Name,
 			"remote", remoteAddr,

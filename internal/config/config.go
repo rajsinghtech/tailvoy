@@ -4,16 +4,35 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
 )
 
+const (
+	ProtocolHTTP  = "http"
+	ProtocolHTTPS = "https"
+	ProtocolGRPC  = "grpc"
+	ProtocolTLS   = "tls"
+	ProtocolTCP   = "tcp"
+	ProtocolUDP   = "udp"
+)
+
+var envVarRe = regexp.MustCompile(`\$\{([^}]+)\}`)
+
+func expandEnvVars(s string) string {
+	return envVarRe.ReplaceAllStringFunc(s, func(match string) string {
+		name := match[2 : len(match)-1]
+		return os.Getenv(name)
+	})
+}
+
 type Config struct {
-	Tailscale TailscaleConfig  `yaml:"tailscale"`
-	Listeners []Listener       `yaml:"listeners"`
-	Discovery *DiscoveryConfig `yaml:"discovery"`
+	Tailscale TailscaleConfig     `yaml:"tailscale"`
+	Listeners map[string]Listener `yaml:"listeners"`
+	Discovery *DiscoveryConfig    `yaml:"discovery,omitempty"`
 }
 
 type DiscoveryConfig struct {
@@ -24,45 +43,60 @@ type DiscoveryConfig struct {
 	ProxyProtocol  string `yaml:"proxyProtocol"`
 }
 
-// ParsedPollInterval returns the poll interval as a time.Duration, defaulting to 10s.
 func (d *DiscoveryConfig) ParsedPollInterval() time.Duration {
 	if d.PollInterval == "" {
 		return 10 * time.Second
 	}
-	dur, _ := time.ParseDuration(d.PollInterval)
+	dur, err := time.ParseDuration(d.PollInterval)
+	if err != nil {
+		return 10 * time.Second
+	}
 	return dur
 }
 
 type TailscaleConfig struct {
 	Service      string   `yaml:"service"`
-	ClientID     string   `yaml:"clientId"`
-	ClientSecret string   `yaml:"clientSecret"`
 	Tags         []string `yaml:"tags"`
 	ServiceTags  []string `yaml:"serviceTags"`
+	ClientID     string   `yaml:"-"`
+	ClientSecret string   `yaml:"-"`
 }
 
-// Hostname returns the tsnet node hostname (<service>-tailvoy).
-func (t *TailscaleConfig) Hostname() string {
-	return t.Service + "-tailvoy"
-}
-
-// ServiceName returns the VIP service name (svc:<service>).
-func (t *TailscaleConfig) ServiceName() string {
-	return "svc:" + t.Service
-}
+func (t *TailscaleConfig) Hostname() string    { return t.Service + "-tailvoy" }
+func (t *TailscaleConfig) ServiceName() string { return "svc:" + t.Service }
 
 type Listener struct {
-	Name          string `yaml:"name"`
-	Protocol      string `yaml:"protocol"`
-	Listen        string `yaml:"listen"`
-	Forward       string `yaml:"forward"`
-	ProxyProtocol string `yaml:"proxy_protocol"`
-	L7Policy      bool   `yaml:"l7_policy"`
+	Port     int        `yaml:"port"`
+	Protocol string     `yaml:"protocol"`
+	TLS      *TLSConfig `yaml:"tls,omitempty"`
+	Backend  string     `yaml:"backend,omitempty"`
+	Routes   []Route    `yaml:"routes,omitempty"`
 }
 
-var envVarRe = regexp.MustCompile(`\$\{([^}]+)\}`)
+type Route struct {
+	Hostname string            `yaml:"hostname,omitempty"`
+	TLS      *TLSConfig        `yaml:"tls,omitempty"`
+	Backend  string            `yaml:"backend,omitempty"`
+	Paths    map[string]string `yaml:"paths,omitempty"`
+}
 
-// Load reads and parses a YAML config file from the given path.
+type TLSConfig struct {
+	Cert string `yaml:"cert"`
+	Key  string `yaml:"key"`
+}
+
+func validateBackendAddr(context, addr string) error {
+	if !strings.Contains(addr, ":") {
+		return fmt.Errorf("%s: backend %q must be host:port format", context, addr)
+	}
+	return nil
+}
+
+var validProtocols = map[string]bool{
+	ProtocolHTTP: true, ProtocolHTTPS: true, ProtocolGRPC: true,
+	ProtocolTLS: true, ProtocolTCP: true, ProtocolUDP: true,
+}
+
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -71,7 +105,6 @@ func Load(path string) (*Config, error) {
 	return Parse(data)
 }
 
-// Parse parses raw YAML bytes into a validated Config.
 func Parse(data []byte) (*Config, error) {
 	expanded := expandEnvVars(string(data))
 
@@ -80,76 +113,206 @@ func Parse(data []byte) (*Config, error) {
 		return nil, fmt.Errorf("parsing yaml: %w", err)
 	}
 
+	cfg.Tailscale.ClientID = os.Getenv("TS_CLIENT_ID")
+	cfg.Tailscale.ClientSecret = os.Getenv("TS_CLIENT_SECRET")
+
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
-
 	return &cfg, nil
 }
 
-// expandEnvVars replaces ${VAR} references with their environment variable values.
-func expandEnvVars(s string) string {
-	return envVarRe.ReplaceAllStringFunc(s, func(match string) string {
-		name := match[2 : len(match)-1] // trim ${ and }
-		return os.Getenv(name)
-	})
-}
-
 func (c *Config) validate() error {
-	if c.Tailscale.Service == "" {
+	ts := &c.Tailscale
+	if ts.Service == "" {
 		return fmt.Errorf("tailscale.service is required")
 	}
-	if c.Tailscale.ClientID == "" {
-		return fmt.Errorf("tailscale.clientId is required")
+	if len(ts.Tags) == 0 {
+		return fmt.Errorf("tailscale.tags is required")
 	}
-	if c.Tailscale.ClientSecret == "" {
-		return fmt.Errorf("tailscale.clientSecret is required")
+	if len(ts.ServiceTags) == 0 {
+		return fmt.Errorf("tailscale.serviceTags is required")
 	}
-	if len(c.Tailscale.Tags) == 0 {
-		return fmt.Errorf("tailscale.tags is required (node must be tagged for ListenService)")
+	if ts.ClientID == "" {
+		return fmt.Errorf("TS_CLIENT_ID env var is required")
 	}
-	if len(c.Tailscale.ServiceTags) == 0 {
-		return fmt.Errorf("tailscale.serviceTags is required (VIP service needs at least one tag)")
+	if ts.ClientSecret == "" {
+		return fmt.Errorf("TS_CLIENT_SECRET env var is required")
 	}
 
 	if c.Discovery != nil && len(c.Listeners) > 0 {
 		return fmt.Errorf("discovery and listeners are mutually exclusive")
 	}
-
 	if c.Discovery != nil {
 		return c.Discovery.validate()
 	}
 
-	listenerNames := make(map[string]struct{}, len(c.Listeners))
-	for i, l := range c.Listeners {
-		if l.Name == "" {
-			return fmt.Errorf("listeners[%d].name is required", i)
+	if len(c.Listeners) == 0 {
+		return fmt.Errorf("at least one listener is required")
+	}
+
+	names := make([]string, 0, len(c.Listeners))
+	for name := range c.Listeners {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	usedPorts := make(map[int]string)
+	for _, name := range names {
+		if err := validateListener(name, c.Listeners[name], usedPorts); err != nil {
+			return err
 		}
-		if l.Protocol == "" {
-			return fmt.Errorf("listeners[%d].protocol is required", i)
+	}
+	return nil
+}
+
+func validateListener(name string, l Listener, usedPorts map[int]string) error {
+	prefix := fmt.Sprintf("listener %q", name)
+
+	if l.Port < 1 || l.Port > 65535 {
+		return fmt.Errorf("%s: port must be between 1 and 65535", prefix)
+	}
+	if prev, dup := usedPorts[l.Port]; dup {
+		return fmt.Errorf("%s: duplicate port %d (already used by %q)", prefix, l.Port, prev)
+	}
+	usedPorts[l.Port] = name
+
+	if !validProtocols[l.Protocol] {
+		return fmt.Errorf("%s: protocol must be one of: http, https, grpc, tls, tcp, udp", prefix)
+	}
+
+	switch l.Protocol {
+	case ProtocolTCP, ProtocolUDP:
+		if err := validateStreamListener(prefix, l); err != nil {
+			return err
 		}
-		if l.Listen == "" {
-			return fmt.Errorf("listeners[%d].listen is required", i)
+	case ProtocolHTTP, ProtocolGRPC:
+		if err := validateHTTPListener(prefix, l); err != nil {
+			return err
 		}
-		if l.Forward == "" {
-			return fmt.Errorf("listeners[%d].forward is required", i)
+	case ProtocolHTTPS:
+		if err := validateTLSHTTPListener(prefix, l); err != nil {
+			return err
 		}
-		switch l.Protocol {
-		case "tcp", "udp":
-			// valid
-		default:
-			return fmt.Errorf("listeners[%d].protocol must be \"tcp\" or \"udp\", got %q", i, l.Protocol)
+	case ProtocolTLS:
+		if err := validateTLSPassthrough(prefix, l); err != nil {
+			return err
 		}
-		switch l.ProxyProtocol {
-		case "", "v2":
-			// valid
-		default:
-			return fmt.Errorf("listeners[%d].proxy_protocol must be empty or \"v2\", got %q", i, l.ProxyProtocol)
+	}
+
+	return nil
+}
+
+func validateStreamListener(prefix string, l Listener) error {
+	if len(l.Routes) > 0 {
+		return fmt.Errorf("%s: %s listener must not have routes", prefix, l.Protocol)
+	}
+	if l.Backend == "" {
+		return fmt.Errorf("%s: %s listener must have backend", prefix, l.Protocol)
+	}
+	if err := validateBackendAddr(prefix, l.Backend); err != nil {
+		return err
+	}
+	if l.TLS != nil {
+		return fmt.Errorf("%s: %s listener must not have TLS config", prefix, l.Protocol)
+	}
+	return nil
+}
+
+func validateHTTPListener(prefix string, l Listener) error {
+	if l.Backend != "" {
+		return fmt.Errorf("%s: %s listener must not have backend directly", prefix, l.Protocol)
+	}
+	if len(l.Routes) == 0 {
+		return fmt.Errorf("%s: %s listener must have routes", prefix, l.Protocol)
+	}
+	if l.Protocol == ProtocolHTTP && l.TLS != nil {
+		return fmt.Errorf("%s: http listener must not have TLS config", prefix)
+	}
+	for i, r := range l.Routes {
+		if l.Protocol == ProtocolHTTP && r.TLS != nil {
+			return fmt.Errorf("%s: per-route TLS override only allowed for https/grpc (route %d)", prefix, i)
 		}
-		if _, exists := listenerNames[l.Name]; exists {
-			return fmt.Errorf("duplicate listener name: %q", l.Name)
+		if err := validateRoute(prefix, i, r); err != nil {
+			return err
 		}
-		listenerNames[l.Name] = struct{}{}
+	}
+	return nil
+}
+
+func validateTLSHTTPListener(prefix string, l Listener) error {
+	if l.Backend != "" {
+		return fmt.Errorf("%s: %s listener must not have backend directly", prefix, l.Protocol)
+	}
+	if len(l.Routes) == 0 {
+		return fmt.Errorf("%s: %s listener must have routes", prefix, l.Protocol)
+	}
+	// TLS required: either at listener level or every route must have it
+	if l.TLS == nil {
+		for i, r := range l.Routes {
+			if r.TLS == nil {
+				return fmt.Errorf("%s: TLS config is required (set at listener level or on every route, missing on route %d)", prefix, i)
+			}
+		}
+	}
+	for i, r := range l.Routes {
+		if err := validateRoute(prefix, i, r); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateTLSPassthrough(prefix string, l Listener) error {
+	if l.Backend != "" {
+		return fmt.Errorf("%s: tls listener must not have backend directly", prefix)
+	}
+	if len(l.Routes) == 0 {
+		return fmt.Errorf("%s: tls listener must have routes", prefix)
+	}
+	for i, r := range l.Routes {
+		if r.Hostname == "" {
+			return fmt.Errorf("%s: tls route %d: hostname is required for SNI matching", prefix, i)
+		}
+		if len(r.Paths) > 0 {
+			return fmt.Errorf("%s: tls route %d: must not have paths", prefix, i)
+		}
+		if r.Backend == "" {
+			return fmt.Errorf("%s: tls route %d: backend is required", prefix, i)
+		}
+		if err := validateBackendAddr(fmt.Sprintf("%s tls route %d", prefix, i), r.Backend); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateRoute(prefix string, idx int, r Route) error {
+	rp := fmt.Sprintf("%s route %d", prefix, idx)
+
+	hasPaths := len(r.Paths) > 0
+	hasBackend := r.Backend != ""
+
+	if hasBackend && hasPaths {
+		return fmt.Errorf("%s: must have either backend or paths, not both", rp)
+	}
+	if !hasBackend && !hasPaths {
+		return fmt.Errorf("%s: must have either backend or paths", rp)
+	}
+
+	if hasBackend {
+		if err := validateBackendAddr(rp, r.Backend); err != nil {
+			return err
+		}
+	}
+
+	for path, addr := range r.Paths {
+		if !strings.HasPrefix(path, "/") {
+			return fmt.Errorf("%s: path %q must start with /", rp, path)
+		}
+		if err := validateBackendAddr(fmt.Sprintf("%s path %q", rp, path), addr); err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -169,7 +332,6 @@ func (d *DiscoveryConfig) validate() error {
 	}
 	switch d.ProxyProtocol {
 	case "", "v2":
-		// valid
 	default:
 		return fmt.Errorf("discovery.proxyProtocol must be empty or \"v2\", got %q", d.ProxyProtocol)
 	}
@@ -181,32 +343,54 @@ func (d *DiscoveryConfig) validate() error {
 	return nil
 }
 
-// ListenerByName returns the listener with the given name, or nil if not found.
-func (c *Config) ListenerByName(name string) *Listener {
-	for i := range c.Listeners {
-		if c.Listeners[i].Name == name {
-			return &c.Listeners[i]
-		}
-	}
-	return nil
+type FlatListener struct {
+	Name           string
+	Port           int
+	Protocol       string
+	Transport      string
+	IsL7           bool
+	TerminateTLS   bool
+	SNIPassthrough bool
+	DefaultBackend string
+	TLS            *TLSConfig
+	Routes         []Route
+	Forward        string // populated at runtime: envoy override for L7, DefaultBackend for L4
+	ProxyProtocol  bool   // populated at runtime: true for L7 (envoy expects PROXY v2)
 }
 
-// L7Listeners returns all listeners that have L7 policy enabled.
-func (c *Config) L7Listeners() []Listener {
-	var out []Listener
-	for _, l := range c.Listeners {
-		if l.L7Policy {
-			out = append(out, l)
+func (c *Config) FlatListeners() map[string]FlatListener {
+	out := make(map[string]FlatListener, len(c.Listeners))
+	for name, l := range c.Listeners {
+		fl := FlatListener{
+			Name:     name,
+			Port:     l.Port,
+			Protocol: l.Protocol,
+			TLS:      l.TLS,
+			Routes:   l.Routes,
 		}
+		switch l.Protocol {
+		case ProtocolHTTP:
+			fl.Transport = ProtocolTCP
+			fl.IsL7 = true
+		case ProtocolHTTPS:
+			fl.Transport = ProtocolTCP
+			fl.IsL7 = true
+			fl.TerminateTLS = true
+		case ProtocolGRPC:
+			fl.Transport = ProtocolTCP
+			fl.IsL7 = true
+			fl.TerminateTLS = l.TLS != nil
+		case ProtocolTLS:
+			fl.Transport = ProtocolTCP
+			fl.SNIPassthrough = true
+		case ProtocolTCP:
+			fl.Transport = ProtocolTCP
+			fl.DefaultBackend = l.Backend
+		case ProtocolUDP:
+			fl.Transport = ProtocolUDP
+			fl.DefaultBackend = l.Backend
+		}
+		out[name] = fl
 	}
 	return out
-}
-
-// Port extracts the port number from the listen address (e.g., ":443" -> "443").
-func (l *Listener) Port() string {
-	addr := l.Listen
-	if idx := strings.LastIndex(addr, ":"); idx >= 0 {
-		return addr[idx+1:]
-	}
-	return addr
 }

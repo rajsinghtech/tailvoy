@@ -42,25 +42,23 @@ func tailvoyCapMap(routes ...string) tailcfg.PeerCapMap {
 	}
 }
 
+func tcpFlatListener(name, backend string) *config.FlatListener {
+	return &config.FlatListener{
+		Name:           name,
+		Protocol:       "tcp",
+		Transport:      "tcp",
+		IsL7:           false,
+		DefaultBackend: backend,
+		Forward:        backend,
+		ProxyProtocol:  false,
+	}
+}
+
 func TestListenerManagerAllowAndForward(t *testing.T) {
-	// 1. Start a TCP echo backend.
 	backend := startEchoServer(t)
 
-	// 2. Config with a listener pointing to the echo backend.
-	cfg := &config.Config{
-		Tailscale: config.TailscaleConfig{Service: "test"},
-		Listeners: []config.Listener{
-			{
-				Name:     "echo",
-				Protocol: "tcp",
-				Listen:   ":9999",
-				Forward:  backend.Addr().String(),
-			},
-		},
-	}
-	listenerCfg := cfg.ListenerByName("echo")
+	fl := tcpFlatListener("echo", backend.Addr().String())
 
-	// 3. Mock WhoIs that maps 127.0.0.1 to a valid identity with tailvoy cap.
 	whois := &mockWhoIs{
 		responses: map[string]*apitype.WhoIsResponse{
 			"127.0.0.1": {
@@ -75,13 +73,11 @@ func TestListenerManagerAllowAndForward(t *testing.T) {
 		},
 	}
 
-	// 4. Build dependencies.
 	engine := policy.NewEngine()
 	resolver := identity.NewResolver(whois)
 	l4proxy := NewL4Proxy(slog.Default())
 	lm := NewListenerManager(engine, resolver, l4proxy, slog.Default())
 
-	// 5. Create a regular net.Listen as the "tsnet" listener.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -92,10 +88,9 @@ func TestListenerManagerAllowAndForward(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- lm.Serve(ctx, ln, listenerCfg)
+		errCh <- lm.Serve(ctx, ln, fl)
 	}()
 
-	// 6. Connect to the listener, send data, verify echo.
 	conn, err := net.DialTimeout("tcp", ln.Addr().String(), 2*time.Second)
 	if err != nil {
 		t.Fatalf("dial listener: %v", err)
@@ -117,7 +112,6 @@ func TestListenerManagerAllowAndForward(t *testing.T) {
 		t.Fatalf("echo mismatch: got %q, want %q", buf, payload)
 	}
 
-	// Cleanup.
 	conn.Close()
 	cancel()
 
@@ -133,14 +127,7 @@ func TestListenerManagerAllowAndForward(t *testing.T) {
 
 func TestListenerManagerRapidConnectDisconnect(t *testing.T) {
 	backend := startEchoServer(t)
-
-	cfg := &config.Config{
-		Tailscale: config.TailscaleConfig{Service: "test"},
-		Listeners: []config.Listener{{
-			Name: "rapid", Protocol: "tcp", Listen: ":9990", Forward: backend.Addr().String(),
-		}},
-	}
-	listenerCfg := cfg.ListenerByName("rapid")
+	fl := tcpFlatListener("rapid", backend.Addr().String())
 
 	whois := &mockWhoIs{
 		responses: map[string]*apitype.WhoIsResponse{
@@ -165,9 +152,8 @@ func TestListenerManagerRapidConnectDisconnect(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go lm.Serve(ctx, ln, listenerCfg)
+	go lm.Serve(ctx, ln, fl)
 
-	// Rapidly connect and disconnect 20 times.
 	for i := 0; i < 20; i++ {
 		conn, err := net.DialTimeout("tcp", ln.Addr().String(), 2*time.Second)
 		if err != nil {
@@ -176,21 +162,13 @@ func TestListenerManagerRapidConnectDisconnect(t *testing.T) {
 		conn.Close()
 	}
 
-	// Give the server a moment to process all disconnects.
 	time.Sleep(100 * time.Millisecond)
 	cancel()
 }
 
 func TestListenerManagerConcurrentConnections(t *testing.T) {
 	backend := startEchoServer(t)
-
-	cfg := &config.Config{
-		Tailscale: config.TailscaleConfig{Service: "test"},
-		Listeners: []config.Listener{{
-			Name: "concurrent", Protocol: "tcp", Listen: ":9991", Forward: backend.Addr().String(),
-		}},
-	}
-	listenerCfg := cfg.ListenerByName("concurrent")
+	fl := tcpFlatListener("concurrent", backend.Addr().String())
 
 	whois := &mockWhoIs{
 		responses: map[string]*apitype.WhoIsResponse{
@@ -215,7 +193,7 @@ func TestListenerManagerConcurrentConnections(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go lm.Serve(ctx, ln, listenerCfg)
+	go lm.Serve(ctx, ln, fl)
 
 	const numConns = 10
 	var wg sync.WaitGroup
@@ -276,14 +254,7 @@ func (m *slowWhoIs) WhoIs(ctx context.Context, addr string) (*apitype.WhoIsRespo
 
 func TestListenerManagerSlowIdentityResolution(t *testing.T) {
 	backend := startEchoServer(t)
-
-	cfg := &config.Config{
-		Tailscale: config.TailscaleConfig{Service: "test"},
-		Listeners: []config.Listener{{
-			Name: "slow", Protocol: "tcp", Listen: ":9992", Forward: backend.Addr().String(),
-		}},
-	}
-	listenerCfg := cfg.ListenerByName("slow")
+	fl := tcpFlatListener("slow", backend.Addr().String())
 
 	whois := &slowWhoIs{
 		delay: 500 * time.Millisecond,
@@ -309,7 +280,7 @@ func TestListenerManagerSlowIdentityResolution(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go lm.Serve(ctx, ln, listenerCfg)
+	go lm.Serve(ctx, ln, fl)
 
 	conn, err := net.DialTimeout("tcp", ln.Addr().String(), 2*time.Second)
 	if err != nil {
@@ -338,14 +309,7 @@ func TestListenerManagerSlowIdentityResolution(t *testing.T) {
 
 func TestListenerManagerContextCancellationDuringServe(t *testing.T) {
 	backend := startEchoServer(t)
-
-	cfg := &config.Config{
-		Tailscale: config.TailscaleConfig{Service: "test"},
-		Listeners: []config.Listener{{
-			Name: "canceltest", Protocol: "tcp", Listen: ":9993", Forward: backend.Addr().String(),
-		}},
-	}
-	listenerCfg := cfg.ListenerByName("canceltest")
+	fl := tcpFlatListener("canceltest", backend.Addr().String())
 
 	whois := &mockWhoIs{
 		responses: map[string]*apitype.WhoIsResponse{
@@ -370,10 +334,9 @@ func TestListenerManagerContextCancellationDuringServe(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- lm.Serve(ctx, ln, listenerCfg)
+		errCh <- lm.Serve(ctx, ln, fl)
 	}()
 
-	// Establish a connection that is actively forwarding.
 	conn, err := net.DialTimeout("tcp", ln.Addr().String(), 2*time.Second)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
@@ -391,7 +354,6 @@ func TestListenerManagerContextCancellationDuringServe(t *testing.T) {
 		t.Fatalf("read: %v", err)
 	}
 
-	// Cancel context while connection is in flight.
 	cancel()
 
 	select {
@@ -405,24 +367,9 @@ func TestListenerManagerContextCancellationDuringServe(t *testing.T) {
 }
 
 func TestListenerManagerDeny(t *testing.T) {
-	// Backend that should never receive a connection.
 	backend := startEchoServer(t)
+	fl := tcpFlatListener("restricted", backend.Addr().String())
 
-	cfg := &config.Config{
-		Tailscale: config.TailscaleConfig{Service: "test"},
-		Listeners: []config.Listener{
-			{
-				Name:     "restricted",
-				Protocol: "tcp",
-				Listen:   ":9998",
-				Forward:  backend.Addr().String(),
-			},
-		},
-	}
-	listenerCfg := cfg.ListenerByName("restricted")
-
-	// WhoIs maps 127.0.0.1 but without CapMap — identity will have no
-	// AllowedRoutes, so HasAccess returns false and the connection is denied.
 	whois := &mockWhoIs{
 		responses: map[string]*apitype.WhoIsResponse{
 			"127.0.0.1": {
@@ -449,7 +396,7 @@ func TestListenerManagerDeny(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go lm.Serve(ctx, ln, listenerCfg)
+	go lm.Serve(ctx, ln, fl)
 
 	conn, err := net.DialTimeout("tcp", ln.Addr().String(), 2*time.Second)
 	if err != nil {
@@ -457,10 +404,8 @@ func TestListenerManagerDeny(t *testing.T) {
 	}
 	defer conn.Close()
 
-	// Write something; the manager should deny and close the connection.
 	conn.Write([]byte("should be denied"))
 
-	// Expect the connection to be closed by the server (read returns EOF or error).
 	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	buf := make([]byte, 64)
 	n, err := conn.Read(buf)

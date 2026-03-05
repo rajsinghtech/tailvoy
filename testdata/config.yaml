@@ -1,22 +1,21 @@
 tailscale:
-  service: "tailvoy-test"
-  clientId: "${TS_CLIENT_ID}"
-  clientSecret: "${TS_CLIENT_SECRET}"
+  service: tailvoy-test
   tags:
-    - "tag:test"
+    - tag:test
   serviceTags:
-    - "tag:k8s"
+    - tag:k8s
 
 listeners:
-  - name: https
-    protocol: tcp
-    listen: ":443"
-    forward: "envoy:443"
-    proxy_protocol: v2
-    l7_policy: true
+  https:
+    port: 443
+    protocol: https
+    tls:
+      cert: /certs/cert.pem
+      key: /certs/key.pem
+    routes:
+      - backend: envoy:443
 
-  - name: postgres
+  postgres:
+    port: 5432
     protocol: tcp
-    listen: ":5432"
-    forward: "db-server:5432"
-    l7_policy: false
+    backend: db-server:5432

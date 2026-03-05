@@ -1,13 +1,13 @@
 services:
   backend:
     build:
-      context: ./backend
+      context: ../backend
     ports:
       - "18080:8080"
 
   tailvoy:
     build:
-      context: ..
+      context: ../..
       dockerfile: Dockerfile
     environment:
       - TS_CLIENT_ID=${TS_CLIENT_ID}
@@ -15,7 +15,6 @@ services:
     command:
       - "--config"
       - "/config.yaml"
-      - "--standalone"
       - "--log-level"
       - "debug"
     volumes:

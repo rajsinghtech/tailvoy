@@ -28,7 +28,9 @@ test_fail() {
 
 # --- Check prerequisites ---
 if [ -z "${TS_CLIENT_ID:-}" ] || [ -z "${TS_CLIENT_SECRET:-}" ]; then
-    if [ -f "$SCRIPT_DIR/.env" ]; then
+    if [ -f "$SCRIPT_DIR/../.env" ]; then
+        export $(grep -v '^#' "$SCRIPT_DIR/../.env" | xargs)
+    elif [ -f "$SCRIPT_DIR/.env" ]; then
         export $(grep -v '^#' "$SCRIPT_DIR/.env" | xargs)
     else
         echo "FATAL: TS_CLIENT_ID/TS_CLIENT_SECRET not set and no .env file found"

@@ -14,7 +14,6 @@ import (
 	"github.com/rajsinghtech/tailvoy/internal/policy"
 )
 
-// fakeTSNet implements TSNetServer for testing.
 type fakeTSNet struct {
 	listeners map[string]net.Listener
 }
@@ -49,11 +48,20 @@ func testDynLogger() *slog.Logger {
 func newTestDynMgr() (*DynamicListenerManager, *fakeTSNet) {
 	ts := newFakeTSNet()
 	engine := policy.NewEngine()
-	// Use a nil local client resolver — we won't actually resolve identities in these tests.
 	var resolver *identity.Resolver
 	l4 := NewL4Proxy(testDynLogger())
 	lm := NewListenerManager(engine, resolver, l4, testDynLogger())
 	return NewDynamicListenerManager(ts, lm, nil, "svc:test", testDynLogger()), ts
+}
+
+func flatListener(name string, port int, forward string) config.FlatListener {
+	return config.FlatListener{
+		Name:      name,
+		Port:      port,
+		Protocol:  "tcp",
+		Transport: "tcp",
+		Forward:   forward,
+	}
 }
 
 func TestReconcile_AddNewListeners(t *testing.T) {
@@ -61,9 +69,9 @@ func TestReconcile_AddNewListeners(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	desired := []config.Listener{
-		{Name: "web", Protocol: "tcp", Listen: ":8080", Forward: "127.0.0.1:8080"},
-		{Name: "api", Protocol: "tcp", Listen: ":9090", Forward: "127.0.0.1:9090"},
+	desired := []config.FlatListener{
+		flatListener("web", 8080, "127.0.0.1:8080"),
+		flatListener("api", 9090, "127.0.0.1:9090"),
 	}
 
 	if err := dm.Reconcile(ctx, desired); err != nil {
@@ -84,18 +92,16 @@ func TestReconcile_RemoveListeners(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Start with two.
-	initial := []config.Listener{
-		{Name: "web", Protocol: "tcp", Listen: ":8080", Forward: "127.0.0.1:8080"},
-		{Name: "api", Protocol: "tcp", Listen: ":9090", Forward: "127.0.0.1:9090"},
+	initial := []config.FlatListener{
+		flatListener("web", 8080, "127.0.0.1:8080"),
+		flatListener("api", 9090, "127.0.0.1:9090"),
 	}
 	if err := dm.Reconcile(ctx, initial); err != nil {
 		t.Fatal(err)
 	}
 
-	// Remove one.
-	reduced := []config.Listener{
-		{Name: "web", Protocol: "tcp", Listen: ":8080", Forward: "127.0.0.1:8080"},
+	reduced := []config.FlatListener{
+		flatListener("web", 8080, "127.0.0.1:8080"),
 	}
 	if err := dm.Reconcile(ctx, reduced); err != nil {
 		t.Fatal(err)
@@ -119,16 +125,15 @@ func TestReconcile_ChangeListener(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	initial := []config.Listener{
-		{Name: "web", Protocol: "tcp", Listen: ":8080", Forward: "127.0.0.1:8080"},
+	initial := []config.FlatListener{
+		flatListener("web", 8080, "127.0.0.1:8080"),
 	}
 	if err := dm.Reconcile(ctx, initial); err != nil {
 		t.Fatal(err)
 	}
 
-	// Change port.
-	changed := []config.Listener{
-		{Name: "web", Protocol: "tcp", Listen: ":9090", Forward: "127.0.0.1:9090"},
+	changed := []config.FlatListener{
+		flatListener("web", 9090, "127.0.0.1:9090"),
 	}
 	if err := dm.Reconcile(ctx, changed); err != nil {
 		t.Fatal(err)
@@ -142,8 +147,8 @@ func TestReconcile_ChangeListener(t *testing.T) {
 	if count != 1 {
 		t.Errorf("active count = %d, want 1", count)
 	}
-	if active.cfg.Listen != ":9090" {
-		t.Errorf("listen = %q, want :9090", active.cfg.Listen)
+	if active.fl.Port != 9090 {
+		t.Errorf("port = %d, want 9090", active.fl.Port)
 	}
 }
 
@@ -152,14 +157,13 @@ func TestReconcile_NoopOnUnchanged(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	desired := []config.Listener{
-		{Name: "web", Protocol: "tcp", Listen: ":8080", Forward: "127.0.0.1:8080"},
+	desired := []config.FlatListener{
+		flatListener("web", 8080, "127.0.0.1:8080"),
 	}
 	if err := dm.Reconcile(ctx, desired); err != nil {
 		t.Fatal(err)
 	}
 
-	// Same desired set — should be a no-op.
 	if err := dm.Reconcile(ctx, desired); err != nil {
 		t.Fatal(err)
 	}
@@ -178,17 +182,15 @@ func TestStopAll(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	desired := []config.Listener{
-		{Name: "web", Protocol: "tcp", Listen: ":8080", Forward: "127.0.0.1:8080"},
-		{Name: "api", Protocol: "tcp", Listen: ":9090", Forward: "127.0.0.1:9090"},
+	desired := []config.FlatListener{
+		flatListener("web", 8080, "127.0.0.1:8080"),
+		flatListener("api", 9090, "127.0.0.1:9090"),
 	}
 	if err := dm.Reconcile(ctx, desired); err != nil {
 		t.Fatal(err)
 	}
 
 	dm.StopAll()
-
-	// Give goroutines a moment to wind down.
 	time.Sleep(10 * time.Millisecond)
 
 	dm.mu.Lock()
@@ -205,14 +207,13 @@ func TestReconcile_EmptyDesired(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	initial := []config.Listener{
-		{Name: "web", Protocol: "tcp", Listen: ":8080", Forward: "127.0.0.1:8080"},
+	initial := []config.FlatListener{
+		flatListener("web", 8080, "127.0.0.1:8080"),
 	}
 	if err := dm.Reconcile(ctx, initial); err != nil {
 		t.Fatal(err)
 	}
 
-	// Reconcile with empty desired — all should be stopped.
 	if err := dm.Reconcile(ctx, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -231,9 +232,9 @@ func TestReconcile_SkipsUDPListeners(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	desired := []config.Listener{
-		{Name: "web", Protocol: "tcp", Listen: ":8080", Forward: "127.0.0.1:8080"},
-		{Name: "dns", Protocol: "udp", Listen: ":53", Forward: "127.0.0.1:53"},
+	desired := []config.FlatListener{
+		flatListener("web", 8080, "127.0.0.1:8080"),
+		{Name: "dns", Port: 53, Protocol: "udp", Transport: "udp", Forward: "127.0.0.1:53"},
 	}
 	if err := dm.Reconcile(ctx, desired); err != nil {
 		t.Fatalf("Reconcile: %v", err)

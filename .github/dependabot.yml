@@ -8,6 +8,14 @@ updates:
       - dependencies
       - maintenance
 
+  - package-ecosystem: gomod
+    directory: /integration_test/backend/grpc-echo
+    schedule:
+      interval: weekly
+    labels:
+      - dependencies
+      - maintenance
+
   - package-ecosystem: github-actions
     directory: /
     schedule:
@@ -65,7 +73,7 @@ updates:
       - maintenance
 
   - package-ecosystem: docker-compose
-    directory: /integration_test
+    directory: /integration_test/docker
     schedule:
       interval: weekly
     labels:

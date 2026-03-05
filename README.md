@@ -34,13 +34,11 @@ The config file (`config.yaml`) only defines infrastructure -- Tailscale identit
 
 ## Authentication
 
-tailvoy authenticates to Tailscale using OAuth client credentials. Create an OAuth client in the Tailscale admin console and provide the ID and secret via environment variables:
+tailvoy authenticates to Tailscale using OAuth client credentials. Create an OAuth client in the Tailscale admin console and provide the ID and secret via environment variables (`TS_CLIENT_ID` and `TS_CLIENT_SECRET`).
 
 ```yaml
 tailscale:
   service: "my-gw"
-  clientId: "${TS_CLIENT_ID}"
-  clientSecret: "${TS_CLIENT_SECRET}"
   tags:
     - "tag:my-gw"        # ACL tags for the tailvoy node itself
   serviceTags:
@@ -74,10 +72,40 @@ tailvoy creates the VIP service on startup via the Tailscale API and advertises 
 
 tailvoy supports two mutually exclusive ways to define listeners:
 
-- **Static listeners** (`listeners[]`): You declare every listener explicitly in config.yaml. Full control over names, ports, and protocols.
+- **Static listeners** (`listeners`): You declare every listener explicitly in config.yaml. The `protocol` field determines behavior. tailvoy auto-generates Envoy bootstrap config for L7 listeners and manages Envoy as a subprocess.
 - **Discovery mode** (`discovery`): tailvoy polls Envoy's admin API to auto-discover listeners. No listener config needed -- tailvoy creates and removes tsnet listeners dynamically as Envoy's configuration changes.
 
-Discovery mode is ideal for Envoy Gateway deployments where listeners are managed by Gateway API resources and change over time. Static mode is better when you want explicit control or are running standalone.
+Discovery mode is ideal for Envoy Gateway deployments where listeners are managed by Gateway API resources and change over time. Static mode is better when you want explicit control.
+
+## Listeners
+
+Listeners are declared as a named map in config.yaml. The map key is the listener name (used in ACL cap rules). The `protocol` field determines behavior:
+
+- **`http`**, **`https`**, **`grpc`**: L7 protocols. Traffic is routed through Envoy with ext_authz for path-level policy. Use `routes` to define backends.
+- **`tls`**: TLS passthrough. tailvoy peeks at ClientHello for SNI-based hostname gating, then forwards the raw connection.
+- **`tcp`**: Plain TCP forwarding after identity check.
+- **`udp`**: UDP forwarding after identity check.
+
+```yaml
+listeners:
+  web:
+    port: 443
+    protocol: https
+    tls:
+      cert: /certs/cert.pem
+      key: /certs/key.pem
+    routes:
+      - hostname: app.example.com
+        paths:
+          /api/*: api:8080
+          /*: frontend:3000
+      - backend: fallback:8080
+
+  postgres:
+    port: 5432
+    protocol: tcp
+    backend: db:5432
+```
 
 ## Cap rule schema
 
@@ -103,20 +131,17 @@ A web app where different users get access to different paths.
 ```yaml
 tailscale:
   service: "web-gw"
-  clientId: "${TS_CLIENT_ID}"
-  clientSecret: "${TS_CLIENT_SECRET}"
   tags:
     - "tag:web-gw"
   serviceTags:
     - "tag:web-gw"
 
 listeners:
-  - name: http
-    protocol: tcp
-    listen: ":80"
-    forward: "127.0.0.1:8080"
-    proxy_protocol: v2
-    l7_policy: true
+  http:
+    port: 80
+    protocol: http
+    routes:
+      - backend: 127.0.0.1:8080
 ```
 
 **ACL grants:**
@@ -189,11 +214,10 @@ A database port that only tagged nodes can reach. No L7 policy -- just L4 identi
 **config.yaml:**
 ```yaml
 listeners:
-  - name: postgres
+  postgres:
+    port: 5432
     protocol: tcp
-    listen: ":5432"
-    forward: "127.0.0.1:5432"
-    l7_policy: false
+    backend: 127.0.0.1:5432
 ```
 
 **ACL grants:**
@@ -209,16 +233,15 @@ listeners:
 
 ### UDP (e.g. DNS)
 
-> **Note:** UDP listeners are not currently supported by VIP services. In static mode, tailvoy will skip UDP listeners with a warning. UDP proxy code is retained for future VIP service support.
+> **Note:** UDP listeners are not currently supported by VIP services. tailvoy will skip UDP listeners with a warning. UDP proxy code is retained for future VIP service support.
 
 **config.yaml:**
 ```yaml
 listeners:
-  - name: dns
+  dns:
+    port: 53
     protocol: udp
-    listen: ":53"
-    forward: "127.0.0.1:1053"
-    l7_policy: false
+    backend: 127.0.0.1:1053
 ```
 
 **ACL grants:**
@@ -241,12 +264,14 @@ gRPC paths follow the `/package.Service/Method` convention. Route matching works
 **config.yaml:**
 ```yaml
 listeners:
-  - name: grpc
-    protocol: tcp
-    listen: ":50051"
-    forward: "127.0.0.1:50051"
-    proxy_protocol: v2
-    l7_policy: true
+  grpc:
+    port: 50051
+    protocol: grpc
+    tls:
+      cert: /certs/cert.pem
+      key: /certs/key.pem
+    routes:
+      - backend: 127.0.0.1:50051
 ```
 
 **ACL grants:**
@@ -278,11 +303,14 @@ tailvoy forwards the raw TLS connection without terminating it. It peeks at the 
 **config.yaml:**
 ```yaml
 listeners:
-  - name: tls
-    protocol: tcp
-    listen: ":443"
-    forward: "127.0.0.1:8443"
-    l7_policy: false
+  tls:
+    port: 443
+    protocol: tls
+    routes:
+      - hostname: app.example.com
+        backend: 127.0.0.1:8443
+      - hostname: admin.example.com
+        backend: 127.0.0.1:8444
 ```
 
 **ACL grants:**
@@ -345,8 +373,6 @@ Instead of declaring listeners manually, let tailvoy discover them from Envoy's 
 ```yaml
 tailscale:
   service: "my-gateway"
-  clientId: "${TS_CLIENT_ID}"
-  clientSecret: "${TS_CLIENT_SECRET}"
   tags:
     - "tag:my-gateway"
   serviceTags:
@@ -385,7 +411,7 @@ contextExtensions:
     value: "default/eg/http"
 ```
 
-### Multi-listener gateway (static)
+### Multi-listener gateway
 
 A single tailvoy instance handling HTTP, TCP, UDP, gRPC, and TLS -- each on its own port.
 
@@ -393,45 +419,43 @@ A single tailvoy instance handling HTTP, TCP, UDP, gRPC, and TLS -- each on its 
 ```yaml
 tailscale:
   service: "my-gateway"
-  clientId: "${TS_CLIENT_ID}"
-  clientSecret: "${TS_CLIENT_SECRET}"
   tags:
     - "tag:my-gateway"
   serviceTags:
     - "tag:my-gateway"
 
 listeners:
-  - name: http
-    protocol: tcp
-    listen: ":80"
-    forward: "127.0.0.1:8080"
-    proxy_protocol: v2
-    l7_policy: true
+  http:
+    port: 80
+    protocol: http
+    routes:
+      - backend: 127.0.0.1:8080
 
-  - name: grpc
-    protocol: tcp
-    listen: ":50051"
-    forward: "127.0.0.1:8081"
-    proxy_protocol: v2
-    l7_policy: true
+  grpc:
+    port: 50051
+    protocol: grpc
+    tls:
+      cert: /certs/cert.pem
+      key: /certs/key.pem
+    routes:
+      - backend: 127.0.0.1:8081
 
-  - name: postgres
+  postgres:
+    port: 5432
     protocol: tcp
-    listen: ":5432"
-    forward: "127.0.0.1:5432"
-    l7_policy: false
+    backend: 127.0.0.1:5432
 
-  - name: dns
+  dns:
+    port: 53
     protocol: udp
-    listen: ":53"
-    forward: "127.0.0.1:1053"
-    l7_policy: false
+    backend: 127.0.0.1:1053
 
-  - name: tls
-    protocol: tcp
-    listen: ":443"
-    forward: "127.0.0.1:8443"
-    l7_policy: false
+  tls:
+    port: 443
+    protocol: tls
+    routes:
+      - hostname: app.example.com
+        backend: 127.0.0.1:8443
 ```
 
 Different teams get scoped access:
@@ -499,17 +523,18 @@ Multiple matching grants produce multiple cap rules. Rules are evaluated indepen
 
 ## Deployment modes
 
-- **Standalone** (`-standalone`): tailvoy auto-generates Envoy bootstrap config and manages Envoy as a subprocess. No Envoy YAML needed. Uses static listeners.
-- **Envoy Gateway data plane**: tailvoy replaces the default Envoy image via the `EnvoyProxy` CRD, acting as the data plane for [Envoy Gateway](https://gateway.envoyproxy.io/). EG manages routing via xDS while tailvoy handles Tailscale ingress and cap-based policy. Supports both static listeners and discovery mode (recommended).
+- **Standalone** (default): tailvoy auto-generates Envoy bootstrap config and manages Envoy as a subprocess. No Envoy YAML needed. Uses static listeners from config.yaml.
+- **Envoy Gateway data plane**: tailvoy replaces the default Envoy image via the `EnvoyProxy` CRD, acting as the data plane for [Envoy Gateway](https://gateway.envoyproxy.io/). EG manages routing via xDS while tailvoy handles Tailscale ingress and cap-based policy. Uses discovery mode (recommended).
 
 ## Supported protocols
 
 | Protocol | Listener config | Policy check |
 |----------|----------------|-------------|
-| HTTP | `protocol: tcp`, `l7_policy: true` | L4 (listener + hostname) + L7 (route) |
-| gRPC | `protocol: tcp`, `l7_policy: true` | L4 (listener + hostname) + L7 (route) |
-| TCP | `protocol: tcp`, `l7_policy: false` | L4 (listener only) |
-| TLS passthrough | `protocol: tcp`, `l7_policy: false` | L4 (listener + SNI hostname) |
+| HTTP | `protocol: http` | L4 (listener + hostname) + L7 (route) |
+| HTTPS | `protocol: https` | L4 (listener + hostname) + L7 (route) |
+| gRPC | `protocol: grpc` | L4 (listener + hostname) + L7 (route) |
+| TLS passthrough | `protocol: tls` | L4 (listener + SNI hostname) |
+| TCP | `protocol: tcp` | L4 (listener only) |
 | UDP | `protocol: udp` | L4 (listener only) |
 
 ## Install
@@ -533,8 +558,10 @@ Requires Go 1.25+.
 ### Standalone mode
 
 ```sh
-tailvoy -config config.yaml -standalone
+tailvoy -config config.yaml
 ```
+
+tailvoy auto-generates Envoy bootstrap config and manages Envoy as a subprocess for L7 listeners. No Envoy YAML needed.
 
 ### Envoy Gateway data plane
 
@@ -615,7 +642,6 @@ spec:
 | `-config` | `config.yaml` | Path to config file |
 | `-authz-addr` | `127.0.0.1:9001` | ext_authz listen address |
 | `-log-level` | `info` | Log level (`debug`/`info`/`warn`/`error`) |
-| `-standalone` | `false` | Auto-generate Envoy bootstrap from policy |
 
 Any arguments after `--` are passed directly to Envoy.
 
@@ -627,7 +653,7 @@ docker run \
   -e TS_CLIENT_SECRET=tskey-client-secret-... \
   -v $(pwd)/config.yaml:/config.yaml \
   ghcr.io/rajsinghtech/tailvoy:latest \
-  -config /config.yaml -standalone
+  -config /config.yaml
 ```
 
 ## Reference
@@ -636,12 +662,12 @@ docker run \
 
 | Field | Description |
 |-------|-------------|
-| `name` | Listener identifier (used in cap rules' `listeners` field) |
-| `protocol` | `tcp` or `udp` |
-| `listen` | Address to bind (e.g. `:443`) |
-| `forward` | Backend address to proxy to |
-| `proxy_protocol` | Set to `v2` to prepend a PROXY protocol v2 header. Preserves the caller's Tailscale IP so Envoy and your backend see the real client address. |
-| `l7_policy` | Set to `true` to route through Envoy with ext_authz for path-level policy. When `false`, the listener is L4-only (pure TCP/UDP forwarding after cap check). |
+| `port` | Port number to listen on (integer) |
+| `protocol` | `http`, `https`, `grpc`, `tls`, `tcp`, or `udp` |
+| `backend` | Backend address for tcp/udp listeners (e.g. `db:5432`) |
+| `routes` | List of route rules for L7 listeners (http/https/grpc/tls) |
+| `tls.cert` | TLS certificate path (for `https`/`grpc` protocols) |
+| `tls.key` | TLS key path (for `https`/`grpc` protocols) |
 
 ### Discovery options
 

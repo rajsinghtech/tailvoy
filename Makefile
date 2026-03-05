@@ -33,7 +33,7 @@ docker-build:
 		-t $(IMAGE):$(VERSION) .
 
 integration-test:
-	cd integration_test && ./run-full-tests.sh
+	./integration_test/docker/run-full-tests.sh
 
 kind-test:
 	./integration_test/kind/run-kind-tests.sh

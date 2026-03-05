@@ -20,11 +20,11 @@ type TSNetServer interface {
 }
 
 // DynamicListenerManager reconciles tsnet listeners against a desired set
-// of config.Listener entries, starting and stopping listeners as needed.
+// of FlatListener entries, starting and stopping listeners as needed.
 type DynamicListenerManager struct {
 	ts          TSNetServer
 	listenerMgr *ListenerManager
-	svcMgr      *service.Manager // may be nil in tests
+	svcMgr      *service.Manager
 	svcName     string
 	logger      *slog.Logger
 
@@ -33,11 +33,10 @@ type DynamicListenerManager struct {
 }
 
 type dynamicListener struct {
-	cfg    config.Listener
+	fl     config.FlatListener
 	cancel context.CancelFunc
 }
 
-// NewDynamicListenerManager creates a manager that can start/stop listeners dynamically.
 func NewDynamicListenerManager(ts TSNetServer, lm *ListenerManager, svcMgr *service.Manager, svcName string, logger *slog.Logger) *DynamicListenerManager {
 	return &DynamicListenerManager{
 		ts:          ts,
@@ -49,38 +48,34 @@ func NewDynamicListenerManager(ts TSNetServer, lm *ListenerManager, svcMgr *serv
 	}
 }
 
-// Reconcile starts/stops listeners to match the desired set.
-func (dm *DynamicListenerManager) Reconcile(ctx context.Context, desired []config.Listener) error {
+func (dm *DynamicListenerManager) Reconcile(ctx context.Context, desired []config.FlatListener) error {
 	dm.mu.Lock()
 	defer dm.mu.Unlock()
 
-	// Filter UDP — VIP services don't support UDP yet.
-	var tcpDesired []config.Listener
-	for _, l := range desired {
-		if l.Protocol == "udp" {
-			dm.logger.Warn("UDP listener skipped, not supported in discovery mode", "listener", l.Name)
+	var tcpDesired []config.FlatListener
+	for _, fl := range desired {
+		if fl.Transport == config.ProtocolUDP {
+			dm.logger.Warn("UDP listener skipped, not supported in discovery mode", "listener", fl.Name)
 			continue
 		}
-		tcpDesired = append(tcpDesired, l)
+		tcpDesired = append(tcpDesired, fl)
 	}
 
-	// Sync VIP service ports.
 	if dm.svcMgr != nil && len(tcpDesired) > 0 {
 		var ports []string
-		for _, l := range tcpDesired {
-			ports = append(ports, l.Port())
+		for _, fl := range tcpDesired {
+			ports = append(ports, strconv.Itoa(fl.Port))
 		}
 		if err := dm.svcMgr.Ensure(ctx, ports); err != nil {
 			return fmt.Errorf("ensure VIP service: %w", err)
 		}
 	}
 
-	desiredMap := make(map[string]config.Listener, len(tcpDesired))
-	for _, l := range tcpDesired {
-		desiredMap[l.Name] = l
+	desiredMap := make(map[string]config.FlatListener, len(tcpDesired))
+	for _, fl := range tcpDesired {
+		desiredMap[fl.Name] = fl
 	}
 
-	// Stop listeners not in desired set or changed.
 	for name, dl := range dm.active {
 		want, exists := desiredMap[name]
 		if !exists {
@@ -89,21 +84,20 @@ func (dm *DynamicListenerManager) Reconcile(ctx context.Context, desired []confi
 			delete(dm.active, name)
 			continue
 		}
-		if dl.cfg != want {
+		if dl.fl.Port != want.Port || dl.fl.Forward != want.Forward || dl.fl.IsL7 != want.IsL7 {
 			dm.logger.Info("restarting changed listener", "name", name)
 			dl.cancel()
 			delete(dm.active, name)
 		}
 	}
 
-	// Start listeners in desired but not active.
 	var errs []error
-	for _, l := range tcpDesired {
-		if _, exists := dm.active[l.Name]; exists {
+	for _, fl := range tcpDesired {
+		if _, exists := dm.active[fl.Name]; exists {
 			continue
 		}
-		if err := dm.startListener(ctx, l); err != nil {
-			errs = append(errs, fmt.Errorf("start %s: %w", l.Name, err))
+		if err := dm.startListener(ctx, fl); err != nil {
+			errs = append(errs, fmt.Errorf("start %s: %w", fl.Name, err))
 		}
 	}
 
@@ -113,51 +107,40 @@ func (dm *DynamicListenerManager) Reconcile(ctx context.Context, desired []confi
 	return nil
 }
 
-func (dm *DynamicListenerManager) startListener(parentCtx context.Context, l config.Listener) error {
+func (dm *DynamicListenerManager) startListener(parentCtx context.Context, fl config.FlatListener) error {
 	lctx, cancel := context.WithCancel(parentCtx)
 
-	port, err := strconv.ParseUint(l.Port(), 10, 16)
-	if err != nil {
-		cancel()
-		return fmt.Errorf("invalid port for %s: %w", l.Name, err)
-	}
+	port := uint16(fl.Port)
 
-	// VIP service listener — reachable via the service's virtual IP.
-	// tsnet's internal proxy injects a PROXY v2 header with the real
-	// client address; wrap with proxyproto.Listener to parse it so
-	// conn.RemoteAddr() returns the original caller's tailscale IP.
-	rawSvcLn, err := dm.ts.ListenTCPService(dm.svcName, uint16(port))
+	rawSvcLn, err := dm.ts.ListenTCPService(dm.svcName, port)
 	if err != nil {
 		cancel()
-		return fmt.Errorf("listen service tcp %s: %w", l.Name, err)
+		return fmt.Errorf("listen service tcp %s: %w", fl.Name, err)
 	}
 	svcLn := &proxyproto.Listener{Listener: rawSvcLn}
-	dm.logger.Info("service listener started", "name", l.Name, "service", dm.svcName, "port", port)
+	dm.logger.Info("service listener started", "name", fl.Name, "service", dm.svcName, "port", port)
 	go func() {
-		if err := dm.listenerMgr.Serve(lctx, svcLn, &l); err != nil {
-			dm.logger.Debug("service listener ended", "name", l.Name, "err", err)
+		if err := dm.listenerMgr.Serve(lctx, svcLn, &fl); err != nil {
+			dm.logger.Debug("service listener ended", "name", fl.Name, "err", err)
 		}
 	}()
 
-	// Node IP listener — reachable via the node's direct tailscale IP.
-	nodeLn, err := dm.ts.Listen("tcp", ":"+l.Port())
+	nodeLn, err := dm.ts.Listen("tcp", ":"+strconv.Itoa(fl.Port))
 	if err != nil {
-		dm.logger.Warn("node listener failed, VIP-only", "name", l.Name, "port", port, "err", err)
+		dm.logger.Warn("node listener failed, VIP-only", "name", fl.Name, "port", port, "err", err)
 	} else {
-		dm.logger.Info("node listener started", "name", l.Name, "port", port)
+		dm.logger.Info("node listener started", "name", fl.Name, "port", port)
 		go func() {
-			if err := dm.listenerMgr.Serve(lctx, nodeLn, &l); err != nil {
-				dm.logger.Debug("node listener ended", "name", l.Name, "err", err)
+			if err := dm.listenerMgr.Serve(lctx, nodeLn, &fl); err != nil {
+				dm.logger.Debug("node listener ended", "name", fl.Name, "err", err)
 			}
 		}()
 	}
 
-	dm.active[l.Name] = &dynamicListener{cfg: l, cancel: cancel}
+	dm.active[fl.Name] = &dynamicListener{fl: fl, cancel: cancel}
 	return nil
 }
 
-// StopAll cancels all active dynamic listeners.
-// The VIP service is intentionally NOT deleted — multiple replicas may share it.
 func (dm *DynamicListenerManager) StopAll() {
 	dm.mu.Lock()
 	defer dm.mu.Unlock()

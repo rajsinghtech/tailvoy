@@ -1,639 +1,443 @@
 package config
 
 import (
-	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
-func testdataPath(name string) string {
-	return filepath.Join("..", "..", "testdata", name)
-}
-
-// oauthBlock returns the minimum required tailscale YAML block for tests.
-func oauthBlock(svc string) string {
-	return fmt.Sprintf(`tailscale:
-  service: %q
-  clientId: "client-id"
-  clientSecret: "client-secret"
-  tags:
-    - "tag:test"
-  serviceTags:
-    - "tag:svc"
-`, svc)
-}
-
-func TestLoadFromFile(t *testing.T) {
+func setTestEnv(t *testing.T) {
+	t.Helper()
 	t.Setenv("TS_CLIENT_ID", "test-client-id")
 	t.Setenv("TS_CLIENT_SECRET", "test-client-secret")
-
-	cfg, err := Load(testdataPath("config.yaml"))
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-
-	if cfg.Tailscale.Service != "tailvoy-test" {
-		t.Errorf("hostname = %q, want %q", cfg.Tailscale.Service, "tailvoy-test")
-	}
-	if cfg.Tailscale.ClientID != "test-client-id" {
-		t.Errorf("clientId = %q, want %q", cfg.Tailscale.ClientID, "test-client-id")
-	}
-	if got := len(cfg.Listeners); got != 2 {
-		t.Errorf("len(listeners) = %d, want 2", got)
-	}
 }
 
-func TestEnvVarExpansion(t *testing.T) {
-	const secret = "tskey-client-secret-12345"
-	t.Setenv("TS_CLIENT_ID", "test-id")
-	t.Setenv("TS_CLIENT_SECRET", secret)
+func TestParse_Minimal(t *testing.T) {
+	setTestEnv(t)
 
-	cfg, err := Load(testdataPath("config.yaml"))
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if cfg.Tailscale.ClientSecret != secret {
-		t.Errorf("clientSecret = %q, want %q", cfg.Tailscale.ClientSecret, secret)
-	}
-}
+	data := []byte(`
+tailscale:
+  service: myapp
+  tags:
+    - tag:web
+  serviceTags:
+    - tag:svc
 
-func TestParseMinimal(t *testing.T) {
-	data := []byte(oauthBlock("minimal") + `listeners:
-  - name: web
-    protocol: tcp
-    listen: ":80"
-    forward: "localhost:8080"
+listeners:
+  web:
+    port: 80
+    protocol: http
+    routes:
+      - backend: "localhost:8080"
 `)
+
 	cfg, err := Parse(data)
 	if err != nil {
-		t.Fatalf("Parse: %v", err)
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.Tailscale.Service != "minimal" {
-		t.Errorf("hostname = %q, want %q", cfg.Tailscale.Service, "minimal")
+	if cfg.Tailscale.Service != "myapp" {
+		t.Errorf("service = %q, want %q", cfg.Tailscale.Service, "myapp")
+	}
+	if cfg.Tailscale.Hostname() != "myapp-tailvoy" {
+		t.Errorf("Hostname() = %q, want %q", cfg.Tailscale.Hostname(), "myapp-tailvoy")
+	}
+	if cfg.Tailscale.ServiceName() != "svc:myapp" {
+		t.Errorf("ServiceName() = %q, want %q", cfg.Tailscale.ServiceName(), "svc:myapp")
+	}
+	if cfg.Tailscale.ClientID != "test-client-id" {
+		t.Errorf("ClientID = %q, want %q", cfg.Tailscale.ClientID, "test-client-id")
+	}
+	l, ok := cfg.Listeners["web"]
+	if !ok {
+		t.Fatal("missing listener 'web'")
+	}
+	if l.Port != 80 {
+		t.Errorf("port = %d, want 80", l.Port)
+	}
+	if l.Protocol != "http" {
+		t.Errorf("protocol = %q, want %q", l.Protocol, "http")
+	}
+	if len(l.Routes) != 1 || l.Routes[0].Backend != "localhost:8080" {
+		t.Errorf("routes = %+v, unexpected", l.Routes)
 	}
 }
 
-func TestValidationErrors(t *testing.T) {
+func TestParse_FullExample(t *testing.T) {
+	setTestEnv(t)
+
+	data := []byte(`
+tailscale:
+  service: bigapp
+  tags:
+    - tag:web
+    - tag:api
+  serviceTags:
+    - tag:svc
+
+listeners:
+  https-web:
+    port: 443
+    protocol: https
+    tls:
+      cert: /certs/web.crt
+      key: /certs/web.key
+    routes:
+      - hostname: app.example.com
+        paths:
+          /: "localhost:3000"
+          /api: "localhost:4000"
+      - hostname: admin.example.com
+        backend: "localhost:5000"
+        tls:
+          cert: /certs/admin.crt
+          key: /certs/admin.key
+
+  grpc-api:
+    port: 9090
+    protocol: grpc
+    tls:
+      cert: /certs/grpc.crt
+      key: /certs/grpc.key
+    routes:
+      - backend: "localhost:9091"
+
+  tls-passthrough:
+    port: 8443
+    protocol: tls
+    routes:
+      - hostname: db.example.com
+        backend: "localhost:5432"
+      - hostname: cache.example.com
+        backend: "localhost:6379"
+
+  tcp-direct:
+    port: 3306
+    protocol: tcp
+    backend: "localhost:3307"
+
+  udp-dns:
+    port: 53
+    protocol: udp
+    backend: "localhost:5353"
+`)
+
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cfg.Listeners) != 5 {
+		t.Fatalf("got %d listeners, want 5", len(cfg.Listeners))
+	}
+
+	// https listener
+	hl := cfg.Listeners["https-web"]
+	if hl.TLS == nil || hl.TLS.Cert != "/certs/web.crt" {
+		t.Error("https listener TLS not parsed correctly")
+	}
+	if len(hl.Routes) != 2 {
+		t.Fatalf("https routes: got %d, want 2", len(hl.Routes))
+	}
+	if hl.Routes[0].Paths["/"] != "localhost:3000" {
+		t.Error("path / not mapped correctly")
+	}
+	// route-level TLS override
+	if hl.Routes[1].TLS == nil || hl.Routes[1].TLS.Cert != "/certs/admin.crt" {
+		t.Error("route-level TLS override not parsed")
+	}
+
+	// tls passthrough
+	tl := cfg.Listeners["tls-passthrough"]
+	if len(tl.Routes) != 2 {
+		t.Error("tls routes wrong count")
+	}
+	for _, r := range tl.Routes {
+		if r.Hostname == "" {
+			t.Error("tls route missing hostname")
+		}
+	}
+
+	// tcp
+	tcp := cfg.Listeners["tcp-direct"]
+	if tcp.Backend != "localhost:3307" {
+		t.Errorf("tcp backend = %q", tcp.Backend)
+	}
+
+	// udp
+	udp := cfg.Listeners["udp-dns"]
+	if udp.Backend != "localhost:5353" {
+		t.Errorf("udp backend = %q", udp.Backend)
+	}
+}
+
+func TestParse_Validation(t *testing.T) {
+	baseConfig := func() string {
+		return `
+tailscale:
+  service: myapp
+  tags:
+    - tag:web
+  serviceTags:
+    - tag:svc
+`
+	}
+
 	tests := []struct {
-		name string
-		yaml string
-		want string
+		name    string
+		yaml    string
+		envID   string
+		envSec  string
+		wantErr string
 	}{
 		{
-			name: "missing service",
-			yaml: `
-tailscale:
-  clientId: "id"
-  clientSecret: "secret"
-  tags: ["tag:x"]
-  serviceTags: ["tag:y"]
-listeners:
-  - name: web
-    protocol: tcp
-    listen: ":80"
-    forward: "localhost:80"
-`,
-			want: "tailscale.service is required",
+			name:  "missing service",
+			yaml:  "tailscale:\n  tags: [tag:web]\n  serviceTags: [tag:svc]\nlisteners:\n  a:\n    port: 80\n    protocol: http\n    routes:\n      - backend: \"localhost:80\"\n",
+			envID: "x", envSec: "x",
+			wantErr: "tailscale.service is required",
 		},
 		{
-			name: "duplicate listener name",
-			yaml: oauthBlock("test") + `listeners:
-  - name: web
-    protocol: tcp
-    listen: ":80"
-    forward: "localhost:80"
-  - name: web
-    protocol: tcp
-    listen: ":81"
-    forward: "localhost:81"
-`,
-			want: "duplicate listener name",
+			name:  "missing tags",
+			yaml:  "tailscale:\n  service: x\n  serviceTags: [tag:svc]\nlisteners:\n  a:\n    port: 80\n    protocol: http\n    routes:\n      - backend: \"localhost:80\"\n",
+			envID: "x", envSec: "x",
+			wantErr: "tailscale.tags is required",
 		},
 		{
-			name: "missing listener protocol",
-			yaml: oauthBlock("test") + `listeners:
-  - name: web
-    listen: ":80"
-    forward: "localhost:80"
-`,
-			want: "protocol is required",
+			name:  "missing serviceTags",
+			yaml:  "tailscale:\n  service: x\n  tags: [tag:web]\nlisteners:\n  a:\n    port: 80\n    protocol: http\n    routes:\n      - backend: \"localhost:80\"\n",
+			envID: "x", envSec: "x",
+			wantErr: "tailscale.serviceTags is required",
 		},
 		{
-			name: "missing listener listen",
-			yaml: oauthBlock("test") + `listeners:
-  - name: web
-    protocol: tcp
-    forward: "localhost:80"
-`,
-			want: "listen is required",
+			name:  "no listeners",
+			yaml:  baseConfig(),
+			envID: "x", envSec: "x",
+			wantErr: "at least one listener is required",
 		},
 		{
-			name: "missing listener forward",
-			yaml: oauthBlock("test") + `listeners:
-  - name: web
-    protocol: tcp
-    listen: ":80"
-`,
-			want: "forward is required",
+			name:  "port zero",
+			yaml:  baseConfig() + "listeners:\n  a:\n    port: 0\n    protocol: tcp\n    backend: \"localhost:80\"\n",
+			envID: "x", envSec: "x",
+			wantErr: "port must be between 1 and 65535",
+		},
+		{
+			name:  "port too high",
+			yaml:  baseConfig() + "listeners:\n  a:\n    port: 70000\n    protocol: tcp\n    backend: \"localhost:80\"\n",
+			envID: "x", envSec: "x",
+			wantErr: "port must be between 1 and 65535",
+		},
+		{
+			name:  "duplicate port",
+			yaml:  baseConfig() + "listeners:\n  a:\n    port: 80\n    protocol: tcp\n    backend: \"localhost:80\"\n  b:\n    port: 80\n    protocol: tcp\n    backend: \"localhost:81\"\n",
+			envID: "x", envSec: "x",
+			wantErr: "duplicate port",
+		},
+		{
+			name:  "invalid protocol",
+			yaml:  baseConfig() + "listeners:\n  a:\n    port: 80\n    protocol: ftp\n    backend: \"localhost:80\"\n",
+			envID: "x", envSec: "x",
+			wantErr: "protocol must be one of",
+		},
+		{
+			name:  "tcp with routes",
+			yaml:  baseConfig() + "listeners:\n  a:\n    port: 80\n    protocol: tcp\n    backend: \"localhost:80\"\n    routes:\n      - backend: \"localhost:81\"\n",
+			envID: "x", envSec: "x",
+			wantErr: "must not have routes",
+		},
+		{
+			name:  "tcp missing backend",
+			yaml:  baseConfig() + "listeners:\n  a:\n    port: 80\n    protocol: tcp\n",
+			envID: "x", envSec: "x",
+			wantErr: "must have backend",
+		},
+		{
+			name:  "udp with routes",
+			yaml:  baseConfig() + "listeners:\n  a:\n    port: 53\n    protocol: udp\n    backend: \"localhost:53\"\n    routes:\n      - backend: \"localhost:54\"\n",
+			envID: "x", envSec: "x",
+			wantErr: "must not have routes",
+		},
+		{
+			name:  "http with backend",
+			yaml:  baseConfig() + "listeners:\n  a:\n    port: 80\n    protocol: http\n    backend: \"localhost:80\"\n",
+			envID: "x", envSec: "x",
+			wantErr: "must not have backend",
+		},
+		{
+			name:  "http missing routes",
+			yaml:  baseConfig() + "listeners:\n  a:\n    port: 80\n    protocol: http\n",
+			envID: "x", envSec: "x",
+			wantErr: "must have routes",
+		},
+		{
+			name:  "tls route missing hostname",
+			yaml:  baseConfig() + "listeners:\n  a:\n    port: 443\n    protocol: tls\n    routes:\n      - backend: \"localhost:443\"\n",
+			envID: "x", envSec: "x",
+			wantErr: "hostname is required",
+		},
+		{
+			name:  "tls route with paths",
+			yaml:  baseConfig() + "listeners:\n  a:\n    port: 443\n    protocol: tls\n    routes:\n      - hostname: x.com\n        paths:\n          /: \"localhost:80\"\n",
+			envID: "x", envSec: "x",
+			wantErr: "must not have paths",
+		},
+		{
+			name:  "route with both backend and paths",
+			yaml:  baseConfig() + "listeners:\n  a:\n    port: 80\n    protocol: http\n    routes:\n      - backend: \"localhost:80\"\n        paths:\n          /: \"localhost:80\"\n",
+			envID: "x", envSec: "x",
+			wantErr: "must have either backend or paths, not both",
+		},
+		{
+			name:  "path not starting with slash",
+			yaml:  baseConfig() + "listeners:\n  a:\n    port: 80\n    protocol: http\n    routes:\n      - paths:\n          noslash: \"localhost:80\"\n",
+			envID: "x", envSec: "x",
+			wantErr: "must start with /",
+		},
+		{
+			name:  "backend without colon",
+			yaml:  baseConfig() + "listeners:\n  a:\n    port: 80\n    protocol: tcp\n    backend: localhost\n",
+			envID: "x", envSec: "x",
+			wantErr: "must be host:port format",
+		},
+		{
+			name:  "https missing tls",
+			yaml:  baseConfig() + "listeners:\n  a:\n    port: 443\n    protocol: https\n    routes:\n      - backend: \"localhost:443\"\n",
+			envID: "x", envSec: "x",
+			wantErr: "TLS config is required",
+		},
+		{
+			name:  "grpc missing routes",
+			yaml:  baseConfig() + "listeners:\n  a:\n    port: 9090\n    protocol: grpc\n",
+			envID: "x", envSec: "x",
+			wantErr: "grpc listener must have routes",
+		},
+		{
+			name:  "http with tls",
+			yaml:  baseConfig() + "listeners:\n  a:\n    port: 80\n    protocol: http\n    tls:\n      cert: a\n      key: b\n    routes:\n      - backend: \"localhost:80\"\n",
+			envID: "x", envSec: "x",
+			wantErr: "must not have TLS config",
+		},
+		{
+			name:  "tcp with tls",
+			yaml:  baseConfig() + "listeners:\n  a:\n    port: 80\n    protocol: tcp\n    tls:\n      cert: a\n      key: b\n    backend: \"localhost:80\"\n",
+			envID: "x", envSec: "x",
+			wantErr: "must not have TLS config",
+		},
+		{
+			name:  "udp with tls",
+			yaml:  baseConfig() + "listeners:\n  a:\n    port: 53\n    protocol: udp\n    tls:\n      cert: a\n      key: b\n    backend: \"localhost:53\"\n",
+			envID: "x", envSec: "x",
+			wantErr: "must not have TLS config",
+		},
+		{
+			name:  "http route with tls override",
+			yaml:  baseConfig() + "listeners:\n  a:\n    port: 80\n    protocol: http\n    routes:\n      - backend: \"localhost:80\"\n        tls:\n          cert: a\n          key: b\n",
+			envID: "x", envSec: "x",
+			wantErr: "per-route TLS override only allowed",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("TS_CLIENT_ID", tt.envID)
+			t.Setenv("TS_CLIENT_SECRET", tt.envSec)
+
 			_, err := Parse([]byte(tt.yaml))
 			if err == nil {
 				t.Fatal("expected error, got nil")
 			}
-			if got := err.Error(); !strings.Contains(got, tt.want) {
-				t.Errorf("error = %q, want substring %q", got, tt.want)
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error = %q, want substring %q", err.Error(), tt.wantErr)
 			}
 		})
 	}
 }
 
-func TestListenerByName(t *testing.T) {
-	t.Setenv("TS_CLIENT_ID", "id")
-	t.Setenv("TS_CLIENT_SECRET", "secret")
-
-	cfg, err := Load(testdataPath("config.yaml"))
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-
-	if l := cfg.ListenerByName("https"); l == nil {
-		t.Error("ListenerByName(\"https\") returned nil")
-	} else if l.Forward != "envoy:443" {
-		t.Errorf("https forward = %q, want %q", l.Forward, "envoy:443")
-	}
-
-	if l := cfg.ListenerByName("nonexistent"); l != nil {
-		t.Errorf("ListenerByName(\"nonexistent\") = %+v, want nil", l)
-	}
-}
-
-func TestListenerPort(t *testing.T) {
-	tests := []struct {
-		listen string
-		want   string
-	}{
-		{":443", "443"},
-		{"0.0.0.0:8080", "8080"},
-		{":5432", "5432"},
-		{"80", "80"},
-	}
-
-	for _, tt := range tests {
-		l := Listener{Listen: tt.listen}
-		if got := l.Port(); got != tt.want {
-			t.Errorf("Listener{Listen: %q}.Port() = %q, want %q", tt.listen, got, tt.want)
-		}
-	}
-}
-
-func TestL7Listeners(t *testing.T) {
-	t.Setenv("TS_CLIENT_ID", "id")
-	t.Setenv("TS_CLIENT_SECRET", "secret")
-
-	cfg, err := Load(testdataPath("config.yaml"))
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-
-	l7 := cfg.L7Listeners()
-	if len(l7) != 1 {
-		t.Fatalf("len(L7Listeners) = %d, want 1", len(l7))
-	}
-	if l7[0].Name != "https" {
-		t.Errorf("L7Listeners()[0].Name = %q, want %q", l7[0].Name, "https")
-	}
-}
-
-func TestLoadMissingFile(t *testing.T) {
-	_, err := Load(filepath.Join(os.TempDir(), "does-not-exist.yaml"))
-	if err == nil {
-		t.Fatal("expected error for missing file")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Config validation edge cases
-// ---------------------------------------------------------------------------
-
-func TestParse_NoListeners(t *testing.T) {
-	data := []byte(oauthBlock("test"))
-	cfg, err := Parse(data)
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-	if len(cfg.Listeners) != 0 {
-		t.Errorf("expected 0 listeners, got %d", len(cfg.Listeners))
-	}
-}
-
-func TestParse_ListenerEmptyForward(t *testing.T) {
-	data := []byte(oauthBlock("test") + `listeners:
-  - name: web
-    protocol: tcp
-    listen: ":80"
-    forward: ""
-`)
-	_, err := Parse(data)
-	if err == nil {
-		t.Fatal("expected error for empty forward")
-	}
-	if !strings.Contains(err.Error(), "forward is required") {
-		t.Errorf("error = %q, want substring %q", err.Error(), "forward is required")
-	}
-}
-
-func TestParse_VeryLargeConfig(t *testing.T) {
-	var b strings.Builder
-	b.WriteString(oauthBlock("large"))
-	b.WriteString("listeners:\n")
-	for i := 0; i < 200; i++ {
-		fmt.Fprintf(&b, "  - name: svc-%d\n    protocol: tcp\n    listen: \":%d\"\n    forward: \"localhost:%d\"\n", i, 8000+i, 9000+i)
-	}
-
-	cfg, err := Parse([]byte(b.String()))
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-	if len(cfg.Listeners) != 200 {
-		t.Errorf("expected 200 listeners, got %d", len(cfg.Listeners))
-	}
-}
-
-func TestParse_AllOptionalFieldsMissing(t *testing.T) {
-	// With required OAuth fields, hostname-only config should fail validation.
-	data := []byte(`
-tailscale:
-  service: bare-minimum
-`)
-	_, err := Parse(data)
-	if err == nil {
-		t.Fatal("expected error for missing required OAuth fields")
-	}
-	if !strings.Contains(err.Error(), "clientId is required") {
-		t.Errorf("error = %q, want substring about clientId", err.Error())
-	}
-}
-
-func TestEnvVarExpansion_UndefinedVariable(t *testing.T) {
-	t.Setenv("TAILVOY_TEST_UNDEFINED_VAR", "")
-	os.Unsetenv("TAILVOY_TEST_UNDEFINED_VAR")
-
-	data := []byte(oauthBlock("test") + `listeners:
-  - name: web
-    protocol: tcp
-    listen: ":80"
-    forward: "localhost:80"
-`)
-	// Parse should succeed — undefined vars expand to empty but
-	// the oauthBlock helper provides all required fields inline.
-	_, err := Parse(data)
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-}
-
-func TestEnvVarExpansion_NestedSyntax(t *testing.T) {
-	t.Setenv("INNER", "resolved")
+func TestParse_MissingEnvVars(t *testing.T) {
+	os.Unsetenv("TS_CLIENT_ID")
+	os.Unsetenv("TS_CLIENT_SECRET")
 
 	data := []byte(`
 tailscale:
-  service: "test-${INNER}"
-  clientId: "id"
-  clientSecret: "secret"
+  service: myapp
   tags:
-    - "tag:test"
+    - tag:web
   serviceTags:
-    - "tag:svc"
+    - tag:svc
+
 listeners:
-  - name: web
-    protocol: tcp
-    listen: ":80"
-    forward: "localhost:80"
+  web:
+    port: 80
+    protocol: http
+    routes:
+      - backend: "localhost:8080"
 `)
-	cfg, err := Parse(data)
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
+
+	_, err := Parse(data)
+	if err == nil {
+		t.Fatal("expected error for missing env vars")
 	}
-	if cfg.Tailscale.Service != "test-resolved" {
-		t.Errorf("hostname = %q, want %q", cfg.Tailscale.Service, "test-resolved")
+	if !strings.Contains(err.Error(), "TS_CLIENT_ID") {
+		t.Errorf("error = %q, want mention of TS_CLIENT_ID", err.Error())
 	}
 }
 
-func TestEnvVarExpansion_MultipleVars(t *testing.T) {
-	t.Setenv("HOST", "myhost")
-	t.Setenv("PORT", "9090")
+func TestFlatListeners(t *testing.T) {
+	os.Setenv("TS_CLIENT_ID", "id")
+	os.Setenv("TS_CLIENT_SECRET", "secret")
+	defer os.Unsetenv("TS_CLIENT_ID")
+	defer os.Unsetenv("TS_CLIENT_SECRET")
 
-	data := []byte(`
+	y := `
 tailscale:
-  service: "${HOST}"
-  clientId: "id"
-  clientSecret: "secret"
-  tags:
-    - "tag:test"
-  serviceTags:
-    - "tag:svc"
+  service: x
+  tags: [tag:x]
+  serviceTags: [tag:x]
 listeners:
-  - name: web
+  web:
+    port: 443
+    protocol: https
+    tls:
+      cert: /c.pem
+      key: /k.pem
+    routes:
+      - backend: app:8080
+  postgres:
+    port: 5432
     protocol: tcp
-    listen: ":80"
-    forward: "${HOST}:${PORT}"
-`)
-	cfg, err := Parse(data)
+    backend: db:5432
+  dns:
+    port: 53
+    protocol: udp
+    backend: coredns:1053
+  vault:
+    port: 8443
+    protocol: tls
+    routes:
+      - hostname: vault.example.com
+        backend: vault:8200
+`
+	cfg, err := Parse([]byte(y))
 	if err != nil {
-		t.Fatalf("Parse: %v", err)
+		t.Fatal(err)
 	}
-	if cfg.Tailscale.Service != "myhost" {
-		t.Errorf("hostname = %q, want %q", cfg.Tailscale.Service, "myhost")
-	}
-	if cfg.Listeners[0].Forward != "myhost:9090" {
-		t.Errorf("forward = %q, want %q", cfg.Listeners[0].Forward, "myhost:9090")
-	}
-}
 
-func TestEnvVarExpansion_LiteralDollarBrace(t *testing.T) {
-	// "${}" with empty var name won't match the regex; stays literal.
-	data := []byte(oauthBlock("test") + `listeners:
-  - name: web
-    protocol: tcp
-    listen: ":80"
-    forward: "localhost:80"
-`)
-	_, err := Parse(data)
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-}
+	flat := cfg.FlatListeners()
 
-// ---------------------------------------------------------------------------
-// OAuth + service config
-// ---------------------------------------------------------------------------
+	web := flat["web"]
+	if !web.IsL7 || !web.TerminateTLS || web.Transport != "tcp" {
+		t.Errorf("web: IsL7=%v TerminateTLS=%v Transport=%s", web.IsL7, web.TerminateTLS, web.Transport)
+	}
 
-func TestParse_OAuthConfig(t *testing.T) {
-	t.Setenv("TS_CID", "oauth-client-123")
-	t.Setenv("TS_CSEC", "oauth-secret-456")
+	pg := flat["postgres"]
+	if pg.IsL7 || pg.TerminateTLS || pg.DefaultBackend != "db:5432" || pg.Transport != "tcp" {
+		t.Errorf("postgres: IsL7=%v DefaultBackend=%s Transport=%s", pg.IsL7, pg.DefaultBackend, pg.Transport)
+	}
 
-	data := []byte(`
-tailscale:
-  service: "my-proxy"
-  clientId: "${TS_CID}"
-  clientSecret: "${TS_CSEC}"
-  tags:
-    - "tag:infra"
-    - "tag:proxy"
-  serviceTags:
-    - "tag:k8s"
-`)
-	cfg, err := Parse(data)
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
+	dns := flat["dns"]
+	if dns.Transport != "udp" || dns.DefaultBackend != "coredns:1053" {
+		t.Errorf("dns: Transport=%s DefaultBackend=%s", dns.Transport, dns.DefaultBackend)
 	}
-	if cfg.Tailscale.ClientID != "oauth-client-123" {
-		t.Errorf("clientId = %q, want %q", cfg.Tailscale.ClientID, "oauth-client-123")
-	}
-	if cfg.Tailscale.ClientSecret != "oauth-secret-456" {
-		t.Errorf("clientSecret = %q, want %q", cfg.Tailscale.ClientSecret, "oauth-secret-456")
-	}
-	if len(cfg.Tailscale.Tags) != 2 {
-		t.Errorf("len(tags) = %d, want 2", len(cfg.Tailscale.Tags))
-	}
-	if len(cfg.Tailscale.ServiceTags) != 1 {
-		t.Errorf("len(serviceTags) = %d, want 1", len(cfg.Tailscale.ServiceTags))
-	}
-}
 
-func TestParse_ServiceNameDefault(t *testing.T) {
-	data := []byte(oauthBlock("my-proxy"))
-	cfg, err := Parse(data)
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-	if got := cfg.Tailscale.ServiceName(); got != "svc:my-proxy" {
-		t.Errorf("ServiceName() = %q, want %q", got, "svc:my-proxy")
-	}
-}
-
-func TestParse_Hostname(t *testing.T) {
-	data := []byte(oauthBlock("my-proxy"))
-	cfg, err := Parse(data)
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-	if got := cfg.Tailscale.Hostname(); got != "my-proxy-tailvoy" {
-		t.Errorf("Hostname() = %q, want %q", got, "my-proxy-tailvoy")
-	}
-}
-
-func TestValidation_MissingClientId(t *testing.T) {
-	data := []byte(`
-tailscale:
-  service: "test"
-  clientSecret: "secret"
-  tags: ["tag:x"]
-  serviceTags: ["tag:y"]
-`)
-	_, err := Parse(data)
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if !strings.Contains(err.Error(), "tailscale.clientId is required") {
-		t.Errorf("error = %q", err)
-	}
-}
-
-func TestValidation_MissingClientSecret(t *testing.T) {
-	data := []byte(`
-tailscale:
-  service: "test"
-  clientId: "id"
-  tags: ["tag:x"]
-  serviceTags: ["tag:y"]
-`)
-	_, err := Parse(data)
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if !strings.Contains(err.Error(), "tailscale.clientSecret is required") {
-		t.Errorf("error = %q", err)
-	}
-}
-
-func TestValidation_MissingTags(t *testing.T) {
-	data := []byte(`
-tailscale:
-  service: "test"
-  clientId: "id"
-  clientSecret: "secret"
-  serviceTags: ["tag:y"]
-`)
-	_, err := Parse(data)
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if !strings.Contains(err.Error(), "tailscale.tags is required") {
-		t.Errorf("error = %q", err)
-	}
-}
-
-func TestValidation_MissingServiceTags(t *testing.T) {
-	data := []byte(`
-tailscale:
-  service: "test"
-  clientId: "id"
-  clientSecret: "secret"
-  tags: ["tag:x"]
-`)
-	_, err := Parse(data)
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if !strings.Contains(err.Error(), "tailscale.serviceTags is required") {
-		t.Errorf("error = %q", err)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Discovery config validation
-// ---------------------------------------------------------------------------
-
-func TestDiscoveryConfig_Valid(t *testing.T) {
-	data := []byte(oauthBlock("test") + `discovery:
-  envoyAdmin: "http://127.0.0.1:9901"
-  envoyAddress: "127.0.0.1"
-  pollInterval: "5s"
-  proxyProtocol: "v2"
-  listenerFilter: ".*http.*"
-`)
-	cfg, err := Parse(data)
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-	if cfg.Discovery == nil {
-		t.Fatal("expected non-nil Discovery")
-	}
-	if cfg.Discovery.EnvoyAdmin != "http://127.0.0.1:9901" {
-		t.Errorf("envoyAdmin = %q", cfg.Discovery.EnvoyAdmin)
-	}
-}
-
-func TestDiscoveryConfig_MissingEnvoyAdmin(t *testing.T) {
-	data := []byte(oauthBlock("test") + `discovery:
-  envoyAddress: "127.0.0.1"
-`)
-	_, err := Parse(data)
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if !strings.Contains(err.Error(), "envoyAdmin is required") {
-		t.Errorf("error = %q", err)
-	}
-}
-
-func TestDiscoveryConfig_MissingEnvoyAddress(t *testing.T) {
-	data := []byte(oauthBlock("test") + `discovery:
-  envoyAdmin: "http://127.0.0.1:9901"
-`)
-	_, err := Parse(data)
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if !strings.Contains(err.Error(), "envoyAddress is required") {
-		t.Errorf("error = %q", err)
-	}
-}
-
-func TestDiscoveryConfig_MutualExclusion(t *testing.T) {
-	data := []byte(oauthBlock("test") + `discovery:
-  envoyAdmin: "http://127.0.0.1:9901"
-  envoyAddress: "127.0.0.1"
-listeners:
-  - name: web
-    protocol: tcp
-    listen: ":80"
-    forward: "localhost:80"
-`)
-	_, err := Parse(data)
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if !strings.Contains(err.Error(), "mutually exclusive") {
-		t.Errorf("error = %q", err)
-	}
-}
-
-func TestDiscoveryConfig_InvalidPollInterval(t *testing.T) {
-	data := []byte(oauthBlock("test") + `discovery:
-  envoyAdmin: "http://127.0.0.1:9901"
-  envoyAddress: "127.0.0.1"
-  pollInterval: "not-a-duration"
-`)
-	_, err := Parse(data)
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if !strings.Contains(err.Error(), "pollInterval") {
-		t.Errorf("error = %q", err)
-	}
-}
-
-func TestDiscoveryConfig_InvalidProxyProtocol(t *testing.T) {
-	data := []byte(oauthBlock("test") + `discovery:
-  envoyAdmin: "http://127.0.0.1:9901"
-  envoyAddress: "127.0.0.1"
-  proxyProtocol: "v1"
-`)
-	_, err := Parse(data)
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if !strings.Contains(err.Error(), "proxyProtocol") {
-		t.Errorf("error = %q", err)
-	}
-}
-
-func TestDiscoveryConfig_InvalidListenerFilter(t *testing.T) {
-	data := []byte(oauthBlock("test") + `discovery:
-  envoyAdmin: "http://127.0.0.1:9901"
-  envoyAddress: "127.0.0.1"
-  listenerFilter: "[invalid"
-`)
-	_, err := Parse(data)
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if !strings.Contains(err.Error(), "listenerFilter") {
-		t.Errorf("error = %q", err)
-	}
-}
-
-func TestDiscoveryConfig_DefaultPollInterval(t *testing.T) {
-	d := &DiscoveryConfig{
-		EnvoyAdmin:   "http://127.0.0.1:9901",
-		EnvoyAddress: "127.0.0.1",
-	}
-	dur := d.ParsedPollInterval()
-	if dur != 10*time.Second {
-		t.Errorf("default poll interval = %v, want 10s", dur)
-	}
-}
-
-func TestValidationErrors_MissingListenerName(t *testing.T) {
-	data := []byte(oauthBlock("test") + `listeners:
-  - protocol: tcp
-    listen: ":80"
-    forward: "localhost:80"
-`)
-	_, err := Parse(data)
-	if err == nil {
-		t.Fatal("expected error for missing listener name")
-	}
-	if !strings.Contains(err.Error(), "name is required") {
-		t.Errorf("error = %q, want substring %q", err.Error(), "name is required")
+	v := flat["vault"]
+	if !v.SNIPassthrough || v.IsL7 || v.Transport != "tcp" {
+		t.Errorf("vault: SNIPassthrough=%v IsL7=%v Transport=%s", v.SNIPassthrough, v.IsL7, v.Transport)
 	}
 }

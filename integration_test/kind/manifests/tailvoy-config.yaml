@@ -6,17 +6,15 @@ metadata:
 data:
   config.yaml: |
     tailscale:
-      service: "tailvoy-kind-test"
-      clientId: "${TS_CLIENT_ID}"
-      clientSecret: "${TS_CLIENT_SECRET}"
+      service: tailvoy-kind-test
       tags:
-        - "tag:kind"
+        - tag:kind
       serviceTags:
-        - "tag:kind"
+        - tag:kind
     discovery:
-      envoyAdmin: "http://127.0.0.1:19000"
-      envoyAddress: "127.0.0.1"
-      pollInterval: "5s"
+      envoyAdmin: http://127.0.0.1:19000
+      envoyAddress: 127.0.0.1
+      pollInterval: 5s
       proxyProtocol: v2
 ---
 apiVersion: v1

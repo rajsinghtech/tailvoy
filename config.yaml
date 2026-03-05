@@ -4,27 +4,28 @@
 # Authorization is defined in your Tailscale ACL policy (policy.hujson)
 # using peer capability grants with "rajsingh.info/cap/tailvoy".
 # See docs/plans/2026-03-04-cap-based-policy-design.md for details.
+#
+# Authentication: set TS_CLIENT_ID and TS_CLIENT_SECRET env vars.
 
 tailscale:
-  service: "tailvoy-gw"
-  clientId: "${TS_CLIENT_ID}"
-  clientSecret: "${TS_CLIENT_SECRET}"
+  service: tailvoy-gw
   tags:
-    - "tag:tailvoy"
+    - tag:tailvoy
   serviceTags:
-    - "tag:tailvoy"
+    - tag:tailvoy
 
 listeners:
-  - name: https
-    protocol: tcp
-    listen: ":443"
-    forward: "127.0.0.1:10443"
-    proxy_protocol: v2
-    l7_policy: true
+  https:
+    port: 443
+    protocol: https
+    tls:
+      cert: /certs/cert.pem
+      key: /certs/key.pem
+    routes:
+      - backend: 127.0.0.1:10443
 
-  - name: http
-    protocol: tcp
-    listen: ":80"
-    forward: "127.0.0.1:10080"
-    proxy_protocol: v2
-    l7_policy: true
+  http:
+    port: 80
+    protocol: http
+    routes:
+      - backend: 127.0.0.1:10080

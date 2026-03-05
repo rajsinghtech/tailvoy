@@ -100,29 +100,29 @@ func TestDiscover_ParsesListeners(t *testing.T) {
 	}
 
 	// Sorted by name: http first, then tcp.
-	http := listeners[0]
-	if http.Name != "default/http-gateway/http" {
-		t.Errorf("name = %q", http.Name)
+	httpL := listeners[0]
+	if httpL.Name != "default/http-gateway/http" {
+		t.Errorf("name = %q", httpL.Name)
 	}
-	if http.Listen != ":8080" {
-		t.Errorf("listen = %q", http.Listen)
+	if httpL.Port != 8080 {
+		t.Errorf("port = %d, want 8080", httpL.Port)
 	}
-	if http.Forward != "127.0.0.1:8080" {
-		t.Errorf("forward = %q", http.Forward)
+	if httpL.Forward != "127.0.0.1:8080" {
+		t.Errorf("forward = %q", httpL.Forward)
 	}
-	if !http.L7Policy {
-		t.Error("expected L7Policy=true for HTTP listener")
+	if !httpL.IsL7 {
+		t.Error("expected IsL7=true for HTTP listener")
 	}
-	if http.Protocol != "tcp" {
-		t.Errorf("protocol = %q, want tcp", http.Protocol)
+	if httpL.Protocol != "http" {
+		t.Errorf("protocol = %q, want http", httpL.Protocol)
 	}
 
-	tcp := listeners[1]
-	if tcp.Name != "default/tcp-gateway/tcp" {
-		t.Errorf("name = %q", tcp.Name)
+	tcpL := listeners[1]
+	if tcpL.Name != "default/tcp-gateway/tcp" {
+		t.Errorf("name = %q", tcpL.Name)
 	}
-	if tcp.L7Policy {
-		t.Error("expected L7Policy=false for TCP listener")
+	if tcpL.IsL7 {
+		t.Error("expected IsL7=false for TCP listener")
 	}
 }
 
@@ -175,8 +175,8 @@ func TestDiscover_ProxyProtocol(t *testing.T) {
 	}
 
 	for _, l := range listeners {
-		if l.ProxyProtocol != "v2" {
-			t.Errorf("listener %s proxy_protocol = %q, want v2", l.Name, l.ProxyProtocol)
+		if !l.ProxyProtocol {
+			t.Errorf("listener %s proxy_protocol = false, want true", l.Name)
 		}
 	}
 }
@@ -247,11 +247,8 @@ func TestDiscover_EmptyDynamicListeners(t *testing.T) {
 func TestWatch_SendsOnChange(t *testing.T) {
 	call := 0
 	responses := []string{
-		// First call: one listener
 		`{"configs":[{"dynamic_listeners":[{"name":"a","active_state":{"listener":{"name":"a","address":{"socket_address":{"address":"0.0.0.0","port_value":8080}},"filter_chains":[]}}}]}]}`,
-		// Second call: same (no send)
 		`{"configs":[{"dynamic_listeners":[{"name":"a","active_state":{"listener":{"name":"a","address":{"socket_address":{"address":"0.0.0.0","port_value":8080}},"filter_chains":[]}}}]}]}`,
-		// Third call: changed (new listener added)
 		`{"configs":[{"dynamic_listeners":[{"name":"a","active_state":{"listener":{"name":"a","address":{"socket_address":{"address":"0.0.0.0","port_value":8080}},"filter_chains":[]}}},{"name":"b","active_state":{"listener":{"name":"b","address":{"socket_address":{"address":"0.0.0.0","port_value":9090}},"filter_chains":[]}}}]}]}`,
 	}
 
@@ -279,7 +276,6 @@ func TestWatch_SendsOnChange(t *testing.T) {
 
 	ch := d.Watch(ctx)
 
-	// Should get initial send.
 	select {
 	case listeners := <-ch:
 		if len(listeners) != 1 {
@@ -289,7 +285,6 @@ func TestWatch_SendsOnChange(t *testing.T) {
 		t.Fatal("timeout waiting for initial discovery")
 	}
 
-	// Should get second send when listeners change.
 	select {
 	case listeners := <-ch:
 		if len(listeners) != 2 {
@@ -301,7 +296,6 @@ func TestWatch_SendsOnChange(t *testing.T) {
 }
 
 func TestDiscover_FullConfigDumpWithOtherEntries(t *testing.T) {
-	// Simulate a real /config_dump response with clusters, routes, and listeners.
 	fullDump := `{
 		"configs": [
 			{"@type": "type.googleapis.com/envoy.admin.v3.BootstrapConfigDump"},
@@ -337,19 +331,19 @@ func TestDiscover_FullConfigDumpWithOtherEntries(t *testing.T) {
 	}
 }
 
-func TestListenersEqual(t *testing.T) {
-	a := []config.Listener{{Name: "x", Listen: ":80"}}
-	b := []config.Listener{{Name: "x", Listen: ":80"}}
-	if !listenersEqual(a, b) {
+func TestFlatListenersEqual(t *testing.T) {
+	a := []config.FlatListener{{Name: "x", Port: 80}}
+	b := []config.FlatListener{{Name: "x", Port: 80}}
+	if !flatListenersEqual(a, b) {
 		t.Error("expected equal")
 	}
 
-	c := []config.Listener{{Name: "x", Listen: ":81"}}
-	if listenersEqual(a, c) {
+	c := []config.FlatListener{{Name: "x", Port: 81}}
+	if flatListenersEqual(a, c) {
 		t.Error("expected not equal")
 	}
 
-	if listenersEqual(a, nil) {
+	if flatListenersEqual(a, nil) {
 		t.Error("expected not equal for nil")
 	}
 }

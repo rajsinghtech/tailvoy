@@ -15,12 +15,10 @@ import (
 	"github.com/rajsinghtech/tailvoy/internal/config"
 )
 
-// configDump is the top-level response from Envoy's /config_dump endpoint.
 type configDump struct {
 	Configs []json.RawMessage `json:"configs"`
 }
 
-// listenersConfigDump represents the full ListenersConfigDump entry.
 type listenersConfigDump struct {
 	Type             string            `json:"@type"`
 	DynamicListeners []dynamicListener `json:"dynamic_listeners"`
@@ -60,7 +58,6 @@ type filter struct {
 	Name string `json:"name"`
 }
 
-// Discoverer polls Envoy's admin API to discover active listeners.
 type Discoverer struct {
 	adminURL       string
 	envoyAddr      string
@@ -71,7 +68,6 @@ type Discoverer struct {
 	logger         *slog.Logger
 }
 
-// New creates a Discoverer from the given config.
 func New(cfg *config.DiscoveryConfig, logger *slog.Logger) (*Discoverer, error) {
 	d := &Discoverer{
 		adminURL:      strings.TrimRight(cfg.EnvoyAdmin, "/"),
@@ -91,8 +87,7 @@ func New(cfg *config.DiscoveryConfig, logger *slog.Logger) (*Discoverer, error) 
 	return d, nil
 }
 
-// Discover fetches current listeners from the Envoy admin API.
-func (d *Discoverer) Discover(ctx context.Context) ([]config.Listener, error) {
+func (d *Discoverer) Discover(ctx context.Context) ([]config.FlatListener, error) {
 	url := d.adminURL + "/config_dump"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -117,7 +112,7 @@ func (d *Discoverer) Discover(ctx context.Context) ([]config.Listener, error) {
 	return d.parse(body)
 }
 
-func (d *Discoverer) parse(body []byte) ([]config.Listener, error) {
+func (d *Discoverer) parse(body []byte) ([]config.FlatListener, error) {
 	var dump configDump
 	if err := json.Unmarshal(body, &dump); err != nil {
 		return nil, fmt.Errorf("parse config dump: %w", err)
@@ -125,20 +120,18 @@ func (d *Discoverer) parse(body []byte) ([]config.Listener, error) {
 
 	var dynamicListeners []dynamicListener
 	for _, raw := range dump.Configs {
-		// Try to parse as ListenersConfigDump (full config_dump response).
 		var lcd listenersConfigDump
 		if err := json.Unmarshal(raw, &lcd); err == nil && len(lcd.DynamicListeners) > 0 {
 			dynamicListeners = append(dynamicListeners, lcd.DynamicListeners...)
 			continue
 		}
-		// Try to parse as individual DynamicListener (?resource=dynamic_listeners format).
 		var dl dynamicListener
 		if err := json.Unmarshal(raw, &dl); err == nil && dl.ActiveState != nil {
 			dynamicListeners = append(dynamicListeners, dl)
 		}
 	}
 
-	var listeners []config.Listener
+	var listeners []config.FlatListener
 	for _, dl := range dynamicListeners {
 		if dl.ActiveState == nil {
 			continue
@@ -160,25 +153,38 @@ func (d *Discoverer) parse(body []byte) ([]config.Listener, error) {
 			continue
 		}
 
-		protocol := "tcp"
+		transport := config.ProtocolTCP
 		if strings.EqualFold(sa.Protocol, "UDP") {
-			protocol = "udp"
+			transport = config.ProtocolUDP
 		}
 
 		allChains := append([]filterChain(nil), lc.FilterChains...)
 		if lc.DefaultFilterChain != nil {
 			allChains = append(allChains, *lc.DefaultFilterChain)
 		}
-		l7 := d.hasHTTPConnectionManager(allChains)
+		isL7 := d.hasHTTPConnectionManager(allChains)
 
-		listeners = append(listeners, config.Listener{
-			Name:          name,
-			Protocol:      protocol,
-			Listen:        fmt.Sprintf(":%d", port),
-			Forward:       fmt.Sprintf("%s:%d", d.envoyAddr, port),
-			ProxyProtocol: d.proxyProtocol,
-			L7Policy:      l7,
-		})
+		fl := config.FlatListener{
+			Name:      name,
+			Port:      port,
+			Transport: transport,
+			IsL7:      isL7,
+			Forward:   fmt.Sprintf("%s:%d", d.envoyAddr, port),
+		}
+
+		if isL7 {
+			fl.Protocol = config.ProtocolHTTP
+		} else if transport == config.ProtocolUDP {
+			fl.Protocol = config.ProtocolUDP
+		} else {
+			fl.Protocol = config.ProtocolTCP
+		}
+
+		if d.proxyProtocol == "v2" {
+			fl.ProxyProtocol = true
+		}
+
+		listeners = append(listeners, fl)
 	}
 
 	sort.Slice(listeners, func(i, j int) bool {
@@ -198,16 +204,13 @@ func (d *Discoverer) hasHTTPConnectionManager(chains []filterChain) bool {
 	return false
 }
 
-// Watch polls on interval and sends updated listener slices on the returned channel.
-// Only sends when the set changes. Closes the channel on ctx cancellation.
-func (d *Discoverer) Watch(ctx context.Context) <-chan []config.Listener {
-	ch := make(chan []config.Listener, 1)
+func (d *Discoverer) Watch(ctx context.Context) <-chan []config.FlatListener {
+	ch := make(chan []config.FlatListener, 1)
 	go func() {
 		defer close(ch)
 
-		var prev []config.Listener
+		var prev []config.FlatListener
 
-		// Initial discovery.
 		if listeners, err := d.Discover(ctx); err != nil {
 			d.logger.Error("initial discovery failed", "err", err)
 		} else {
@@ -233,7 +236,7 @@ func (d *Discoverer) Watch(ctx context.Context) <-chan []config.Listener {
 					continue
 				}
 				d.logger.Debug("discovery poll completed", "count", len(listeners))
-				if !listenersEqual(prev, listeners) {
+				if !flatListenersEqual(prev, listeners) {
 					d.logger.Info("discovered listener change",
 						"prev", len(prev), "new", len(listeners))
 					prev = listeners
@@ -249,12 +252,14 @@ func (d *Discoverer) Watch(ctx context.Context) <-chan []config.Listener {
 	return ch
 }
 
-func listenersEqual(a, b []config.Listener) bool {
+func flatListenersEqual(a, b []config.FlatListener) bool {
 	if len(a) != len(b) {
 		return false
 	}
 	for i := range a {
-		if a[i] != b[i] {
+		if a[i].Name != b[i].Name || a[i].Port != b[i].Port ||
+			a[i].Protocol != b[i].Protocol || a[i].Forward != b[i].Forward ||
+			a[i].IsL7 != b[i].IsL7 || a[i].Transport != b[i].Transport {
 			return false
 		}
 	}

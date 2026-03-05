@@ -3,6 +3,7 @@ package envoy
 import (
 	"fmt"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -10,23 +11,16 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// GenerateStandaloneConfig produces a complete Envoy bootstrap YAML for
-// standalone mode (no xDS). Each listener in cfg gets an Envoy listener and
-// backend cluster. L7 listeners use HTTP Connection Manager with ext_authz;
-// L4 listeners use TCP proxy.
-
 // envoyInternalPort returns the internal port Envoy should listen on for a
-// given listener in standalone mode. This uses port + 10000 to avoid conflicts
-// with the tsnet listener on the same port number.
-func envoyInternalPort(listenPort string) int {
-	return portInt(listenPort) + 10000
+// given listener in standalone mode. Uses port + 10000 to avoid conflicts.
+func envoyInternalPort(port int) int {
+	return port + 10000
 }
 
-// StandaloneOverride describes the forward address and proxy protocol that
-// the tsnet listener should use when routing through Envoy in standalone mode.
+// StandaloneOverride describes the forward address that the tsnet listener
+// should use when routing through Envoy in standalone mode.
 type StandaloneOverride struct {
-	Forward       string
-	ProxyProtocol string
+	Forward string
 }
 
 // GenerateStandaloneResult holds the Envoy bootstrap YAML and per-listener
@@ -36,31 +30,124 @@ type GenerateStandaloneResult struct {
 	Overrides     map[string]StandaloneOverride
 }
 
-func GenerateStandaloneConfig(cfg *config.Config, authzAddr string) (*GenerateStandaloneResult, error) {
-	listeners := make([]map[string]interface{}, 0, len(cfg.Listeners))
-	clusters := make([]map[string]interface{}, 0, len(cfg.Listeners)+1)
+var clusterKeyReplacer = strings.NewReplacer(":", "_", ".", "_")
+
+// clusterKey sanitizes a backend address into a valid Envoy cluster name.
+func clusterKey(addr string) string {
+	return clusterKeyReplacer.Replace(addr)
+}
+
+// GenerateStandaloneConfig produces a complete Envoy bootstrap YAML from
+// pre-computed flat listeners. Only L7 listeners (http/https/grpc) produce
+// Envoy listeners; tls/tcp/udp are handled directly by tailvoy.
+func GenerateStandaloneConfig(flat map[string]config.FlatListener, authzAddr string) (*GenerateStandaloneResult, error) {
+	listeners := make([]map[string]interface{}, 0)
+	clusterMap := make(map[string]map[string]interface{}) // clusterKey -> cluster
+	h2Clusters := make(map[string]bool)                   // clusters needing HTTP/2 (gRPC)
 	overrides := make(map[string]StandaloneOverride)
 
-	for _, l := range cfg.Listeners {
-		backendName := l.Name + "_backend"
-		fwdHost, fwdPort := splitHostPort(l.Forward)
+	// Sort listener names for deterministic output.
+	names := make([]string, 0, len(flat))
+	for name := range flat {
+		names = append(names, name)
+	}
+	sort.Strings(names)
 
-		if l.L7Policy {
-			listener := buildHTTPListener(l, backendName)
-			listeners = append(listeners, listener)
-			internalPort := envoyInternalPort(l.Port())
-			overrides[l.Name] = StandaloneOverride{
-				Forward:       fmt.Sprintf("127.0.0.1:%d", internalPort),
-				ProxyProtocol: "v2",
-			}
-		} else {
-			listener := buildTCPListener(l, backendName)
-			listeners = append(listeners, listener)
+	for _, name := range names {
+		fl := flat[name]
+		if !fl.IsL7 {
+			continue
 		}
 
-		clusters = append(clusters, buildCluster(backendName, fwdHost, fwdPort, "5s"))
+		// Collect all backend addresses and build virtual hosts.
+		vhosts, routeClusters := buildVirtualHosts(fl)
+
+		// Register clusters. Mark gRPC backend clusters for HTTP/2.
+		for addr := range routeClusters {
+			key := clusterKey(addr)
+			if _, exists := clusterMap[key]; !exists {
+				host, port := splitHostPort(addr)
+				clusterMap[key] = buildCluster(key, host, port, "5s")
+			}
+			if fl.Protocol == config.ProtocolGRPC {
+				h2Clusters[key] = true
+			}
+		}
+
+		// Build the HCM filter.
+		hcm := map[string]interface{}{
+			"@type":              "type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager",
+			"stat_prefix":        name,
+			"codec_type":         "AUTO",
+			"use_remote_address": true,
+			"route_config": map[string]interface{}{
+				"virtual_hosts": vhosts,
+			},
+			"http_filters": []interface{}{
+				buildExtAuthzFilter(),
+				map[string]interface{}{
+					"name": "envoy.filters.http.router",
+					"typed_config": map[string]interface{}{
+						"@type": "type.googleapis.com/envoy.extensions.filters.http.router.v3.Router",
+					},
+				},
+			},
+		}
+
+		hcmFilter := map[string]interface{}{
+			"name":         "envoy.filters.network.http_connection_manager",
+			"typed_config": hcm,
+		}
+
+		filterChains := buildFilterChains(fl, hcmFilter)
+
+		envoyPort := envoyInternalPort(fl.Port)
+		listener := map[string]interface{}{
+			"name": name,
+			"address": map[string]interface{}{
+				"socket_address": map[string]interface{}{
+					"address":    "127.0.0.1",
+					"port_value": envoyPort,
+				},
+			},
+			"listener_filters": []interface{}{
+				map[string]interface{}{
+					"name": "envoy.filters.listener.proxy_protocol",
+					"typed_config": map[string]interface{}{
+						"@type": "type.googleapis.com/envoy.extensions.filters.listener.proxy_protocol.v3.ProxyProtocol",
+					},
+				},
+			},
+			"filter_chains": filterChains,
+		}
+
+		listeners = append(listeners, listener)
+		overrides[name] = StandaloneOverride{
+			Forward: fmt.Sprintf("127.0.0.1:%d", envoyPort),
+		}
 	}
 
+	// Build sorted cluster list.
+	clusters := make([]map[string]interface{}, 0, len(clusterMap)+1)
+	clusterNames := make([]string, 0, len(clusterMap))
+	for k := range clusterMap {
+		clusterNames = append(clusterNames, k)
+	}
+	sort.Strings(clusterNames)
+	for _, k := range clusterNames {
+		c := clusterMap[k]
+		if h2Clusters[k] {
+			c["typed_extension_protocol_options"] = map[string]interface{}{
+				"envoy.extensions.upstreams.http.v3.HttpProtocolOptions": map[string]interface{}{
+					"@type": "type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions",
+					"explicit_http_config": map[string]interface{}{
+						"http2_protocol_options": map[string]interface{}{},
+					},
+				},
+			}
+		}
+		clusters = append(clusters, c)
+	}
 	clusters = append(clusters, buildExtAuthzCluster(authzAddr))
 
 	bootstrap := map[string]interface{}{
@@ -88,82 +175,175 @@ func GenerateStandaloneConfig(cfg *config.Config, authzAddr string) (*GenerateSt
 	}, nil
 }
 
-// InjectExtAuthz takes existing Envoy bootstrap YAML and injects an ext_authz
-// HTTP filter into every HTTP Connection Manager found in static_resources.
-func InjectExtAuthz(bootstrapYAML string, authzAddr string) (string, error) {
-	var bootstrap map[string]interface{}
-	if err := yaml.Unmarshal([]byte(bootstrapYAML), &bootstrap); err != nil {
-		return "", fmt.Errorf("unmarshal bootstrap: %w", err)
+// buildVirtualHosts groups routes into Envoy virtual hosts and returns the
+// set of backend addresses referenced.
+func buildVirtualHosts(fl config.FlatListener) ([]interface{}, map[string]bool) {
+	type vhostEntry struct {
+		domains []string
+		routes  []map[string]interface{}
 	}
 
-	sr, ok := bootstrap["static_resources"].(map[string]interface{})
-	if !ok {
-		return "", fmt.Errorf("static_resources not found or invalid")
-	}
+	byHost := make(map[string]*vhostEntry) // "" key = catch-all
+	backends := make(map[string]bool)
 
-	listeners, ok := sr["listeners"].([]interface{})
-	if !ok {
-		return "", fmt.Errorf("listeners not found or invalid")
-	}
-
-	// Add ext_authz cluster.
-	clusters, _ := sr["clusters"].([]interface{})
-	clusters = append(clusters, buildExtAuthzCluster(authzAddr))
-	sr["clusters"] = clusters
-
-	for _, rawL := range listeners {
-		l, ok := rawL.(map[string]interface{})
+	for _, r := range fl.Routes {
+		key := r.Hostname
+		ve, ok := byHost[key]
 		if !ok {
-			continue
-		}
-		listenerName, _ := l["name"].(string)
-		if listenerName == "" {
-			listenerName = "default"
-		}
-		authzFilter := buildExtAuthzFilter()
-		fcs, ok := l["filter_chains"].([]interface{})
-		if !ok {
-			continue
-		}
-		for _, rawFC := range fcs {
-			fc, ok := rawFC.(map[string]interface{})
-			if !ok {
-				continue
+			ve = &vhostEntry{}
+			if key == "" {
+				ve.domains = []string{"*"}
+			} else {
+				ve.domains = []string{key}
 			}
-			filters, ok := fc["filters"].([]interface{})
-			if !ok {
-				continue
-			}
-			for _, rawF := range filters {
-				f, ok := rawF.(map[string]interface{})
-				if !ok {
-					continue
-				}
-				if f["name"] != "envoy.filters.network.http_connection_manager" {
-					continue
-				}
-				tc, ok := f["typed_config"].(map[string]interface{})
-				if !ok {
-					continue
-				}
-				// Inject ext_authz HTTP filter.
-				existing, _ := tc["http_filters"].([]interface{})
-				injected := make([]interface{}, 0, len(existing)+1)
-				injected = append(injected, authzFilter)
-				injected = append(injected, existing...)
-				tc["http_filters"] = injected
+			byHost[key] = ve
+		}
 
-				// Inject per-route context_extensions on all routes.
-				injectPerRouteContextExtensions(tc, listenerName)
+		if len(r.Paths) > 0 {
+			// Sort paths for deterministic output.
+			paths := make([]string, 0, len(r.Paths))
+			for p := range r.Paths {
+				paths = append(paths, p)
 			}
+			sort.Strings(paths)
+
+			for _, p := range paths {
+				addr := r.Paths[p]
+				backends[addr] = true
+				// Convert glob patterns to Envoy match: /foo/* → prefix /foo/
+				envoyMatch := pathToEnvoyMatch(p)
+				ve.routes = append(ve.routes, map[string]interface{}{
+					"match": envoyMatch,
+					"route": map[string]interface{}{
+						"cluster": clusterKey(addr),
+					},
+					"typed_per_filter_config": perRouteExtAuthz(fl.Name),
+				})
+			}
+		} else if r.Backend != "" {
+			backends[r.Backend] = true
+			ve.routes = append(ve.routes, map[string]interface{}{
+				"match": map[string]interface{}{
+					"prefix": "/",
+				},
+				"route": map[string]interface{}{
+					"cluster": clusterKey(r.Backend),
+				},
+				"typed_per_filter_config": perRouteExtAuthz(fl.Name),
+			})
 		}
 	}
 
-	out, err := yaml.Marshal(bootstrap)
-	if err != nil {
-		return "", fmt.Errorf("marshal modified bootstrap: %w", err)
+	// Sort host keys for deterministic output; catch-all ("") sorts first.
+	hostKeys := make([]string, 0, len(byHost))
+	for k := range byHost {
+		hostKeys = append(hostKeys, k)
 	}
-	return string(out), nil
+	sort.Strings(hostKeys)
+
+	vhosts := make([]interface{}, 0, len(byHost))
+	for _, key := range hostKeys {
+		ve := byHost[key]
+		vhName := key
+		if vhName == "" {
+			vhName = "catch_all"
+		}
+
+		domains := make([]interface{}, len(ve.domains))
+		for i, d := range ve.domains {
+			domains[i] = d
+		}
+
+		routes := make([]interface{}, len(ve.routes))
+		for i, r := range ve.routes {
+			routes[i] = r
+		}
+
+		vhosts = append(vhosts, map[string]interface{}{
+			"name":    vhName,
+			"domains": domains,
+			"routes":  routes,
+		})
+	}
+
+	return vhosts, backends
+}
+
+// buildFilterChains constructs filter chains for an L7 listener. If the
+// listener terminates TLS, per-hostname TLS overrides produce separate
+// filter chains with server_names matching.
+func buildFilterChains(fl config.FlatListener, hcmFilter map[string]interface{}) []interface{} {
+	if !fl.TerminateTLS {
+		return []interface{}{
+			map[string]interface{}{
+				"filters": []interface{}{hcmFilter},
+			},
+		}
+	}
+
+	// Collect per-hostname TLS overrides.
+	type tlsOverride struct {
+		hostname string
+		tls      *config.TLSConfig
+	}
+	var overrides []tlsOverride
+	for _, r := range fl.Routes {
+		if r.TLS != nil && r.Hostname != "" {
+			overrides = append(overrides, tlsOverride{hostname: r.Hostname, tls: r.TLS})
+		}
+	}
+
+	// Default filter chain with listener-level TLS.
+	defaultChain := map[string]interface{}{
+		"filters": []interface{}{hcmFilter},
+	}
+	if fl.TLS != nil {
+		defaultChain["transport_socket"] = buildDownstreamTLS(fl.TLS)
+	}
+
+	if len(overrides) == 0 {
+		return []interface{}{defaultChain}
+	}
+
+	// Sort overrides by hostname for deterministic output.
+	sort.Slice(overrides, func(i, j int) bool {
+		return overrides[i].hostname < overrides[j].hostname
+	})
+
+	chains := make([]interface{}, 0, len(overrides)+1)
+	for _, ov := range overrides {
+		chains = append(chains, map[string]interface{}{
+			"filter_chain_match": map[string]interface{}{
+				"server_names": []interface{}{ov.hostname},
+			},
+			"filters":          []interface{}{hcmFilter},
+			"transport_socket": buildDownstreamTLS(ov.tls),
+		})
+	}
+	chains = append(chains, defaultChain)
+	return chains
+}
+
+// buildDownstreamTLS creates a downstream TLS transport socket config.
+func buildDownstreamTLS(tls *config.TLSConfig) map[string]interface{} {
+	return map[string]interface{}{
+		"name": "envoy.transport_sockets.tls",
+		"typed_config": map[string]interface{}{
+			"@type": "type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext",
+			"common_tls_context": map[string]interface{}{
+				"tls_certificates": []interface{}{
+					map[string]interface{}{
+						"certificate_chain": map[string]interface{}{
+							"filename": tls.Cert,
+						},
+						"private_key": map[string]interface{}{
+							"filename": tls.Key,
+						},
+					},
+				},
+			},
+		},
+	}
 }
 
 // buildCluster creates a STRICT_DNS cluster pointing to host:port.
@@ -194,8 +374,7 @@ func buildCluster(name, host, port, timeout string) map[string]interface{} {
 	}
 }
 
-// buildExtAuthzCluster creates the ext_authz cluster from an address like "host:port".
-// It includes HTTP/2 protocol options required for gRPC.
+// buildExtAuthzCluster creates the ext_authz cluster with HTTP/2 for gRPC.
 func buildExtAuthzCluster(authzAddr string) map[string]interface{} {
 	host, port := splitHostPort(authzAddr)
 	c := buildCluster("tailvoy_ext_authz", host, port, "1s")
@@ -208,127 +387,6 @@ func buildExtAuthzCluster(authzAddr string) map[string]interface{} {
 		},
 	}
 	return c
-}
-
-// injectPerRouteContextExtensions walks the route_config inside an HCM
-// typed_config and adds typed_per_filter_config with the listener name
-// as a context extension for ext_authz.
-func injectPerRouteContextExtensions(hcmTC map[string]interface{}, listenerName string) {
-	rc, ok := hcmTC["route_config"].(map[string]interface{})
-	if !ok {
-		return
-	}
-	vhosts, ok := rc["virtual_hosts"].([]interface{})
-	if !ok {
-		return
-	}
-	for _, rawVH := range vhosts {
-		vh, ok := rawVH.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		routes, ok := vh["routes"].([]interface{})
-		if !ok {
-			continue
-		}
-		for _, rawRoute := range routes {
-			route, ok := rawRoute.(map[string]interface{})
-			if !ok {
-				continue
-			}
-			route["typed_per_filter_config"] = perRouteExtAuthz(listenerName)
-		}
-	}
-}
-
-func buildHTTPListener(l config.Listener, backendCluster string) map[string]interface{} {
-	envoyPort := envoyInternalPort(l.Port())
-	return map[string]interface{}{
-		"name": l.Name,
-		"address": map[string]interface{}{
-			"socket_address": map[string]interface{}{
-				"address":    "127.0.0.1",
-				"port_value": envoyPort,
-			},
-		},
-		"listener_filters": []interface{}{
-			map[string]interface{}{
-				"name": "envoy.filters.listener.proxy_protocol",
-				"typed_config": map[string]interface{}{
-					"@type": "type.googleapis.com/envoy.extensions.filters.listener.proxy_protocol.v3.ProxyProtocol",
-				},
-			},
-		},
-		"filter_chains": []interface{}{
-			map[string]interface{}{
-				"filters": []interface{}{
-					map[string]interface{}{
-						"name": "envoy.filters.network.http_connection_manager",
-						"typed_config": map[string]interface{}{
-							"@type":              "type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager",
-							"stat_prefix":        l.Name,
-							"codec_type":         "AUTO",
-							"use_remote_address": true,
-							"route_config": map[string]interface{}{
-								"virtual_hosts": []interface{}{
-									map[string]interface{}{
-										"name":    l.Name,
-										"domains": []interface{}{"*"},
-										"routes": []interface{}{
-											map[string]interface{}{
-												"match": map[string]interface{}{
-													"prefix": "/",
-												},
-												"route": map[string]interface{}{
-													"cluster": backendCluster,
-												},
-												"typed_per_filter_config": perRouteExtAuthz(l.Name),
-											},
-										},
-									},
-								},
-							},
-							"http_filters": []interface{}{
-								buildExtAuthzFilter(),
-								map[string]interface{}{
-									"name": "envoy.filters.http.router",
-									"typed_config": map[string]interface{}{
-										"@type": "type.googleapis.com/envoy.extensions.filters.http.router.v3.Router",
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-}
-
-func buildTCPListener(l config.Listener, backendCluster string) map[string]interface{} {
-	return map[string]interface{}{
-		"name": l.Name,
-		"address": map[string]interface{}{
-			"socket_address": map[string]interface{}{
-				"address":    "0.0.0.0",
-				"port_value": portInt(l.Port()),
-			},
-		},
-		"filter_chains": []interface{}{
-			map[string]interface{}{
-				"filters": []interface{}{
-					map[string]interface{}{
-						"name": "envoy.filters.network.tcp_proxy",
-						"typed_config": map[string]interface{}{
-							"@type":       "type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy",
-							"stat_prefix": l.Name,
-							"cluster":     backendCluster,
-						},
-					},
-				},
-			},
-		},
-	}
 }
 
 func buildExtAuthzFilter() map[string]interface{} {
@@ -363,6 +421,26 @@ func perRouteExtAuthz(listenerName string) map[string]interface{} {
 	}
 }
 
+// pathToEnvoyMatch converts a config path pattern to an Envoy route match.
+// Glob patterns like /foo/* become prefix matches on /foo/.
+// Exact paths like /health become exact matches.
+func pathToEnvoyMatch(p string) map[string]interface{} {
+	if strings.HasSuffix(p, "/*") {
+		return map[string]interface{}{
+			"prefix": strings.TrimSuffix(p, "*"),
+		}
+	}
+	if strings.HasSuffix(p, "*") {
+		return map[string]interface{}{
+			"prefix": strings.TrimSuffix(p, "*"),
+		}
+	}
+	// No wildcard — use prefix match (consistent with "/" catch-all behavior).
+	return map[string]interface{}{
+		"prefix": p,
+	}
+}
+
 // splitHostPort splits an address of the form "host:port" into its components.
 func splitHostPort(addr string) (host, port string) {
 	h, p, err := net.SplitHostPort(addr)
@@ -375,8 +453,7 @@ func splitHostPort(addr string) (host, port string) {
 	return h, p
 }
 
-// portInt converts a port string to an integer for Envoy config. Returns 0 on
-// parse failure or negative values, which will surface as an Envoy validation error.
+// portInt converts a port string to an integer for Envoy config.
 func portInt(port string) int {
 	n, err := strconv.Atoi(port)
 	if err != nil || n < 0 {

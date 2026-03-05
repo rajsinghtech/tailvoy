@@ -51,12 +51,10 @@ func run(args []string) error {
 	configPath := fs.String("config", "config.yaml", "path to config YAML")
 	authzAddr := fs.String("authz-addr", "127.0.0.1:9001", "ext_authz listen address")
 	logLevel := fs.String("log-level", "info", "log level (debug/info/warn/error)")
-	standalone := fs.Bool("standalone", false, "generate envoy config from policy")
 	if err := fs.Parse(tailvoyArgs); err != nil {
 		return err
 	}
 
-	// Setup logger.
 	var level slog.Level
 	switch *logLevel {
 	case "debug":
@@ -72,18 +70,14 @@ func run(args []string) error {
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 
-	// Load policy config.
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}
 
-	// Context with signal handling.
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	// Build Tailscale API client for VIP service management.
-	// Tailnet is always "-" (current tailnet) since we auth via OAuth.
 	tsClient := &tailscale.Client{
 		Tailnet: "-",
 		Auth: &tailscale.OAuth{
@@ -92,7 +86,6 @@ func run(args []string) error {
 		},
 	}
 
-	// Start tsnet with OAuth credentials.
 	ts := &tsnet.Server{
 		Hostname:      cfg.Tailscale.Hostname(),
 		AuthKey:       cfg.Tailscale.ClientSecret,
@@ -111,7 +104,6 @@ func run(args []string) error {
 		return fmt.Errorf("local client: %w", err)
 	}
 
-	// Build components.
 	svcMgr := service.New(tsClient, cfg.Tailscale.ServiceName(), cfg.Tailscale.ServiceTags, logger)
 	engine := policy.NewEngine()
 	resolver := identity.NewResolver(lc)
@@ -123,7 +115,7 @@ func run(args []string) error {
 
 	var wg sync.WaitGroup
 
-	// Start ext_authz server.
+	// Start ext_authz gRPC server.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -133,48 +125,7 @@ func run(args []string) error {
 	}()
 	logger.Info("ext_authz server starting", "addr", *authzAddr)
 
-	// Standalone mode: generate envoy config and apply overrides BEFORE
-	// starting listeners so they use the correct forward addresses.
-	if *standalone {
-		result, err := envoy.GenerateStandaloneConfig(cfg, *authzAddr)
-		if err != nil {
-			cancel()
-			wg.Wait()
-			return fmt.Errorf("generate envoy config: %w", err)
-		}
-
-		for i := range cfg.Listeners {
-			if ov, ok := result.Overrides[cfg.Listeners[i].Name]; ok {
-				cfg.Listeners[i].Forward = ov.Forward
-				cfg.Listeners[i].ProxyProtocol = ov.ProxyProtocol
-				logger.Info("standalone: routing L7 listener through envoy",
-					"name", cfg.Listeners[i].Name,
-					"envoy_addr", ov.Forward,
-				)
-			}
-		}
-
-		tmpFile, err := os.CreateTemp("", "tailvoy-envoy-*.yaml")
-		if err != nil {
-			cancel()
-			wg.Wait()
-			return fmt.Errorf("create temp config: %w", err)
-		}
-		defer func() { _ = os.Remove(tmpFile.Name()) }()
-
-		if _, err := tmpFile.WriteString(result.BootstrapYAML); err != nil {
-			tmpFile.Close()
-			cancel()
-			wg.Wait()
-			return fmt.Errorf("write envoy config: %w", err)
-		}
-		tmpFile.Close()
-
-		envoyArgs = append([]string{"-c", tmpFile.Name()}, envoyArgs...)
-		logger.Info("generated standalone envoy config", "path", tmpFile.Name())
-	}
-
-	// Get the tailscale IPv4 for UDP listeners (ListenPacket requires an IP).
+	// Get the tailscale IPv4 for UDP listeners.
 	ip4, _ := ts.TailscaleIPs()
 	var tsIP string
 	if ip4.IsValid() {
@@ -202,25 +153,62 @@ func run(args []string) error {
 			}
 		}()
 	} else {
-		// Static mode: start listeners via both ListenService (VIP) and Listen (node IP).
-		svcName := cfg.Tailscale.ServiceName()
-
-		// Collect TCP ports, warn and skip UDP for VIP service.
-		var tcpPorts []string
-		var tcpListeners []*config.Listener
-		var udpListeners []*config.Listener
-		for i := range cfg.Listeners {
-			l := &cfg.Listeners[i]
-			if l.Protocol == "udp" {
-				logger.Warn("UDP listener has no VIP service support, node IP only", "listener", l.Name)
-				udpListeners = append(udpListeners, l)
-				continue
-			}
-			tcpPorts = append(tcpPorts, l.Port())
-			tcpListeners = append(tcpListeners, l)
+		// Static standalone mode: generate envoy config and start listeners.
+		flat := cfg.FlatListeners()
+		result, err := envoy.GenerateStandaloneConfig(flat, *authzAddr)
+		if err != nil {
+			cancel()
+			wg.Wait()
+			return fmt.Errorf("generate envoy config: %w", err)
 		}
 
-		// Create/update VIP service with TCP ports.
+		for name, fl := range flat {
+			if ov, ok := result.Overrides[name]; ok && fl.IsL7 {
+				fl.Forward = ov.Forward
+				fl.ProxyProtocol = true
+				logger.Info("routing L7 listener through envoy",
+					"name", name, "envoy_addr", ov.Forward)
+			} else {
+				fl.Forward = fl.DefaultBackend
+				fl.ProxyProtocol = false
+			}
+			flat[name] = fl
+		}
+
+		tmpFile, err := os.CreateTemp("", "tailvoy-envoy-*.yaml")
+		if err != nil {
+			cancel()
+			wg.Wait()
+			return fmt.Errorf("create temp config: %w", err)
+		}
+		defer func() { _ = os.Remove(tmpFile.Name()) }()
+
+		if _, err := tmpFile.WriteString(result.BootstrapYAML); err != nil {
+			tmpFile.Close()
+			cancel()
+			wg.Wait()
+			return fmt.Errorf("write envoy config: %w", err)
+		}
+		tmpFile.Close()
+
+		envoyArgs = append([]string{"-c", tmpFile.Name()}, envoyArgs...)
+		logger.Info("generated standalone envoy config", "path", tmpFile.Name())
+
+		svcName := cfg.Tailscale.ServiceName()
+
+		var tcpPorts []string
+		var tcpFLs []config.FlatListener
+		var udpFLs []config.FlatListener
+		for _, fl := range flat {
+			if fl.Transport == config.ProtocolUDP {
+				logger.Warn("UDP listener has no VIP service support, node IP only", "listener", fl.Name)
+				udpFLs = append(udpFLs, fl)
+				continue
+			}
+			tcpPorts = append(tcpPorts, strconv.Itoa(fl.Port))
+			tcpFLs = append(tcpFLs, fl)
+		}
+
 		if len(tcpPorts) > 0 {
 			if err := svcMgr.Ensure(ctx, tcpPorts); err != nil {
 				cancel()
@@ -229,78 +217,71 @@ func run(args []string) error {
 			}
 		}
 
-		// Start TCP listeners via ListenService (VIP) and Listen (node IP).
-		for _, l := range tcpListeners {
-			port, err := strconv.ParseUint(l.Port(), 10, 16)
-			if err != nil {
-				cancel()
-				wg.Wait()
-				return fmt.Errorf("invalid port for %s: %w", l.Name, err)
-			}
+		for _, fl := range tcpFLs {
+			fl := fl
+			port := uint16(fl.Port)
 
-			// VIP service listener — reachable via the service's virtual IP.
-			// Wrap with proxyproto.Listener to parse the PROXY v2 header
-			// that tsnet's internal proxy injects with the real client IP.
 			rawSvcLn, err := ts.ListenService(svcName, tsnet.ServiceModeTCP{
-				Port:                 uint16(port),
+				Port:                 port,
 				PROXYProtocolVersion: 2,
 			})
 			if err != nil {
 				cancel()
 				wg.Wait()
-				return fmt.Errorf("listen service %s (port %d): %w", l.Name, port, err)
+				return fmt.Errorf("listen service %s (port %d): %w", fl.Name, port, err)
 			}
 			svcLn := &proxyproto.Listener{Listener: rawSvcLn}
-			logger.Info("service listener started", "name", l.Name, "service", svcName, "port", port)
+			logger.Info("service listener started", "name", fl.Name, "service", svcName, "port", port)
 
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				if err := listenerMgr.Serve(ctx, svcLn, l); err != nil {
-					logger.Error("service listener error", "name", l.Name, "err", err)
+				if err := listenerMgr.Serve(ctx, svcLn, &fl); err != nil {
+					logger.Error("service listener error", "name", fl.Name, "err", err)
 				}
 			}()
 
-			// Node IP listener — reachable via the node's direct tailscale IP.
-			nodeLn, err := ts.Listen("tcp", ":"+l.Port())
+			portStr := strconv.Itoa(fl.Port)
+			nodeLn, err := ts.Listen("tcp", ":"+portStr)
 			if err != nil {
-				logger.Warn("node listener failed, VIP-only", "name", l.Name, "port", port, "err", err)
+				logger.Warn("node listener failed, VIP-only", "name", fl.Name, "port", port, "err", err)
 			} else {
-				logger.Info("node listener started", "name", l.Name, "port", port)
+				logger.Info("node listener started", "name", fl.Name, "port", port)
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
-					if err := listenerMgr.Serve(ctx, nodeLn, l); err != nil {
-						logger.Error("node listener error", "name", l.Name, "err", err)
+					if err := listenerMgr.Serve(ctx, nodeLn, &fl); err != nil {
+						logger.Error("node listener error", "name", fl.Name, "err", err)
 					}
 				}()
 			}
 		}
 
-		// Start UDP listeners on the node IP (VIP services don't support UDP).
 		if tsIP != "" {
-			for _, l := range udpListeners {
-				pc, err := ts.ListenPacket("udp", tsIP+":"+l.Port())
+			for _, fl := range udpFLs {
+				fl := fl
+				addr := tsIP + ":" + strconv.Itoa(fl.Port)
+				pc, err := ts.ListenPacket("udp", addr)
 				if err != nil {
-					logger.Error("udp listener error", "name", l.Name, "err", err)
+					logger.Error("udp listener error", "name", fl.Name, "err", err)
 					continue
 				}
-				logger.Info("udp listener started", "name", l.Name, "addr", tsIP+":"+l.Port())
+				logger.Info("udp listener started", "name", fl.Name, "addr", addr)
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
-					if err := udpProxy.Serve(ctx, pc, l.Forward, resolver, engine, l.Name); err != nil {
-						logger.Error("udp serve error", "name", l.Name, "err", err)
+					if err := udpProxy.Serve(ctx, pc, fl.Forward, resolver, engine, fl.Name); err != nil {
+						logger.Error("udp serve error", "name", fl.Name, "err", err)
 					}
 				}()
 			}
-		} else if len(udpListeners) > 0 {
+		} else if len(udpFLs) > 0 {
 			logger.Warn("no tailscale IPv4, skipping UDP listeners")
 		}
 
 	}
 
-	// Start envoy if args are present.
+	// Start Envoy if args are present (both standalone and discovery/EG modes).
 	if len(envoyArgs) > 0 {
 		envoyMgr := envoy.NewManager(logger)
 		if err := envoyMgr.Start(ctx, envoyArgs); err != nil {
@@ -309,7 +290,6 @@ func run(args []string) error {
 			return fmt.Errorf("envoy start: %w", err)
 		}
 
-		// Forward signals to envoy.
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		go func() {
@@ -318,7 +298,6 @@ func run(args []string) error {
 			}
 		}()
 
-		// Wait for envoy to exit; cancel context if it dies unexpectedly.
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

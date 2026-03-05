@@ -1,0 +1,13 @@
+tailscale:
+  service: tailvoy-l7-test
+  tags:
+    - tag:docker
+  serviceTags:
+    - tag:docker
+
+listeners:
+  web:
+    port: 80
+    protocol: http
+    routes:
+      - backend: backend:8080

@@ -131,6 +131,25 @@ if [ -z "$IP" ] || [ "$IP" = "null" ]; then
 fi
 sleep 5
 
+# Debug: check VIP routing
+echo "=== Debug: VIP routing ==="
+echo "tailscale version: $(tailscale version 2>&1 | head -1)"
+echo "Node IP: $NODE_IP, VIP IP: $IP"
+echo "--- tailscale status ---"
+tailscale status 2>/dev/null || true
+echo "--- ping node IP ---"
+tailscale ping --c 1 "$NODE_IP" 2>&1 || true
+echo "--- ping VIP IP ---"
+tailscale ping --c 1 "$IP" 2>&1 || true
+echo "--- curl node IP :80 ---"
+curl -sf -o /dev/null -w "%{http_code}" --max-time 5 "http://$NODE_IP:80/" 2>&1 || echo "failed"
+echo ""
+echo "--- curl VIP IP :80 ---"
+curl -sf -o /dev/null -w "%{http_code}" --max-time 5 "http://$IP:80/" 2>&1 || echo "failed"
+echo ""
+echo "--- tailvoy container logs ---"
+docker compose -f "$COMPOSE_FILE" logs tailvoy 2>&1 | tail -30
+
 # Check Envoy is healthy
 echo "=== Checking Envoy health ==="
 docker compose -f "$COMPOSE_FILE" logs tailvoy 2>&1 | grep -q "all dependencies initialized" && echo "Envoy initialized" || echo "WARNING: Envoy may not have initialized"

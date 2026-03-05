@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net"
 	"os"
@@ -35,6 +36,16 @@ func (f *fakeTSNet) ListenPacket(network, addr string) (net.PacketConn, error) {
 	return net.ListenPacket("udp", "127.0.0.1:0")
 }
 
+func (f *fakeTSNet) ListenTCPService(name string, port uint16) (net.Listener, error) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, err
+	}
+	key := fmt.Sprintf("%s:%d", name, port)
+	f.listeners[key] = ln
+	return ln, nil
+}
+
 func testDynLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 }
@@ -47,7 +58,7 @@ func newTestDynMgr() (*DynamicListenerManager, *fakeTSNet) {
 	l4 := NewL4Proxy(testDynLogger())
 	udp := NewUDPProxy(testDynLogger())
 	lm := NewListenerManager(engine, resolver, l4, testDynLogger())
-	return NewDynamicListenerManager(ts, lm, udp, testDynLogger(), "100.64.0.1"), ts
+	return NewDynamicListenerManager(ts, lm, udp, nil, "svc:test", testDynLogger(), "100.64.0.1"), ts
 }
 
 func TestReconcile_AddNewListeners(t *testing.T) {
@@ -217,5 +228,31 @@ func TestReconcile_EmptyDesired(t *testing.T) {
 
 	if count != 0 {
 		t.Errorf("active count = %d, want 0", count)
+	}
+}
+
+func TestReconcile_SkipsUDPListeners(t *testing.T) {
+	dm, _ := newTestDynMgr()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	desired := []config.Listener{
+		{Name: "web", Protocol: "tcp", Listen: ":8080", Forward: "127.0.0.1:8080"},
+		{Name: "dns", Protocol: "udp", Listen: ":53", Forward: "127.0.0.1:53"},
+	}
+	if err := dm.Reconcile(ctx, desired); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	dm.mu.Lock()
+	count := len(dm.active)
+	_, udpExists := dm.active["dns"]
+	dm.mu.Unlock()
+
+	if count != 1 {
+		t.Errorf("active count = %d, want 1 (UDP should be skipped)", count)
+	}
+	if udpExists {
+		t.Error("UDP listener should have been skipped")
 	}
 }

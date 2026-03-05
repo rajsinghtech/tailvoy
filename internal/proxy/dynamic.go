@@ -5,15 +5,18 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"strconv"
 	"sync"
 
 	"github.com/rajsinghtech/tailvoy/internal/config"
+	"github.com/rajsinghtech/tailvoy/internal/service"
 )
 
 // TSNetServer abstracts the tsnet.Server methods used by DynamicListenerManager.
 type TSNetServer interface {
 	Listen(network, addr string) (net.Listener, error)
 	ListenPacket(network, addr string) (net.PacketConn, error)
+	ListenTCPService(name string, port uint16) (net.Listener, error)
 }
 
 // DynamicListenerManager reconciles tsnet listeners against a desired set
@@ -22,6 +25,8 @@ type DynamicListenerManager struct {
 	ts          TSNetServer
 	listenerMgr *ListenerManager
 	udpProxy    *UDPProxy
+	svcMgr      *service.Manager // may be nil in tests
+	svcName     string
 	logger      *slog.Logger
 	tsIP        string // tailscale IPv4 for UDP listeners
 
@@ -35,11 +40,13 @@ type dynamicListener struct {
 }
 
 // NewDynamicListenerManager creates a manager that can start/stop listeners dynamically.
-func NewDynamicListenerManager(ts TSNetServer, lm *ListenerManager, udp *UDPProxy, logger *slog.Logger, tsIP string) *DynamicListenerManager {
+func NewDynamicListenerManager(ts TSNetServer, lm *ListenerManager, udp *UDPProxy, svcMgr *service.Manager, svcName string, logger *slog.Logger, tsIP string) *DynamicListenerManager {
 	return &DynamicListenerManager{
 		ts:          ts,
 		listenerMgr: lm,
 		udpProxy:    udp,
+		svcMgr:      svcMgr,
+		svcName:     svcName,
 		logger:      logger,
 		tsIP:        tsIP,
 		active:      make(map[string]*dynamicListener),
@@ -51,8 +58,29 @@ func (dm *DynamicListenerManager) Reconcile(ctx context.Context, desired []confi
 	dm.mu.Lock()
 	defer dm.mu.Unlock()
 
-	desiredMap := make(map[string]config.Listener, len(desired))
+	// Filter UDP — VIP services don't support UDP yet.
+	var tcpDesired []config.Listener
 	for _, l := range desired {
+		if l.Protocol == "udp" {
+			dm.logger.Warn("UDP listeners not supported with VIP services, skipping", "name", l.Name)
+			continue
+		}
+		tcpDesired = append(tcpDesired, l)
+	}
+
+	// Sync VIP service ports.
+	if dm.svcMgr != nil && len(tcpDesired) > 0 {
+		var ports []string
+		for _, l := range tcpDesired {
+			ports = append(ports, l.Port())
+		}
+		if err := dm.svcMgr.Ensure(ctx, ports); err != nil {
+			return fmt.Errorf("ensure VIP service: %w", err)
+		}
+	}
+
+	desiredMap := make(map[string]config.Listener, len(tcpDesired))
+	for _, l := range tcpDesired {
 		desiredMap[l.Name] = l
 	}
 
@@ -74,7 +102,7 @@ func (dm *DynamicListenerManager) Reconcile(ctx context.Context, desired []confi
 
 	// Start listeners in desired but not active.
 	var errs []error
-	for _, l := range desired {
+	for _, l := range tcpDesired {
 		if _, exists := dm.active[l.Name]; exists {
 			continue
 		}
@@ -115,15 +143,20 @@ func (dm *DynamicListenerManager) startListener(parentCtx context.Context, l con
 			}
 		}()
 	default: // tcp
-		ln, err := dm.ts.Listen("tcp", l.Listen)
+		port, err := strconv.ParseUint(l.Port(), 10, 16)
 		if err != nil {
 			cancel()
-			return fmt.Errorf("listen tcp %s: %w", l.Name, err)
+			return fmt.Errorf("invalid port for %s: %w", l.Name, err)
 		}
-		dm.logger.Info("dynamic tcp listener started", "name", l.Name, "addr", l.Listen)
+		ln, err := dm.ts.ListenTCPService(dm.svcName, uint16(port))
+		if err != nil {
+			cancel()
+			return fmt.Errorf("listen service tcp %s: %w", l.Name, err)
+		}
+		dm.logger.Info("service listener started", "name", l.Name, "service", dm.svcName, "port", port)
 		go func() {
 			if err := dm.listenerMgr.Serve(lctx, ln, &cfg); err != nil {
-				dm.logger.Debug("dynamic tcp listener ended", "name", cfg.Name, "err", err)
+				dm.logger.Debug("service listener ended", "name", cfg.Name, "err", err)
 			}
 		}()
 	}
@@ -141,4 +174,10 @@ func (dm *DynamicListenerManager) StopAll() {
 		dl.cancel()
 	}
 	dm.active = make(map[string]*dynamicListener)
+
+	if dm.svcMgr != nil {
+		if err := dm.svcMgr.Delete(context.Background()); err != nil {
+			dm.logger.Error("failed to delete VIP service on shutdown", "err", err)
+		}
+	}
 }

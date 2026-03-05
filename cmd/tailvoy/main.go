@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
 	"sync"
@@ -19,6 +20,15 @@ import (
 	"github.com/rajsinghtech/tailvoy/internal/proxy"
 	"tailscale.com/tsnet"
 )
+
+// tsnetAdapter wraps *tsnet.Server to satisfy proxy.TSNetServer.
+type tsnetAdapter struct {
+	*tsnet.Server
+}
+
+func (a *tsnetAdapter) ListenTCPService(name string, port uint16) (net.Listener, error) {
+	return a.Server.ListenService(name, tsnet.ServiceModeTCP{Port: port})
+}
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -67,9 +77,8 @@ func run(args []string) error {
 
 	// Start tsnet.
 	ts := &tsnet.Server{
-		Hostname:  cfg.Tailscale.Hostname,
-		AuthKey:   cfg.Tailscale.AuthKey,
-		Ephemeral: cfg.Tailscale.Ephemeral,
+		Hostname: cfg.Tailscale.Hostname,
+		AuthKey:  cfg.Tailscale.ClientSecret,
 	}
 	defer func() { _ = ts.Close() }()
 
@@ -160,7 +169,7 @@ func run(args []string) error {
 			wg.Wait()
 			return fmt.Errorf("discovery setup: %w", err)
 		}
-		dynMgr := proxy.NewDynamicListenerManager(ts, listenerMgr, udpProxy, logger, tsIP)
+		dynMgr := proxy.NewDynamicListenerManager(&tsnetAdapter{ts}, listenerMgr, udpProxy, nil, "", logger, tsIP)
 
 		wg.Add(1)
 		go func() {

@@ -20,3 +20,4 @@
 tsnet-*
 integration_test/.env
 .claude/settings.json
+.worktrees/

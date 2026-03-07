@@ -24,7 +24,7 @@
   "grants": [
     {
       "src": ["tag:user"],
-      "dst": ["tag:docker-svc", "tag:docker"],
+      "dst": ["tag:docker-svc"],
       "ip": ["*"],
       "app": {
         "rajsingh.info/cap/tailvoy": [

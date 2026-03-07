@@ -2,66 +2,50 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 
 	tailscale "tailscale.com/client/tailscale/v2"
 )
 
-type Manager struct {
+// MultiManager manages multiple VIP services.
+type MultiManager struct {
 	client      *tailscale.Client
-	serviceName string
 	serviceTags []string
 	logger      *slog.Logger
 }
 
-func New(client *tailscale.Client, svcName string, tags []string, logger *slog.Logger) *Manager {
-	return &Manager{
-		client:      client,
-		serviceName: svcName,
-		serviceTags: tags,
-		logger:      logger,
-	}
+func NewMultiManager(client *tailscale.Client, tags []string, logger *slog.Logger) *MultiManager {
+	return &MultiManager{client: client, serviceTags: tags, logger: logger}
 }
 
-func (m *Manager) Ensure(ctx context.Context, ports []string) error {
-	// ListenService advertises ports as "tcp:port", so the VIP service
-	// definition must use the same format for the coordination server
-	// to match them.
-	tcpPorts := make([]string, len(ports))
-	for i, p := range ports {
-		tcpPorts[i] = "tcp:" + p
-	}
+// EnsureAll creates or updates all services. mappings is svcName -> list of ports.
+// All services are attempted even if some fail; errors are collected and joined.
+func (mm *MultiManager) EnsureAll(ctx context.Context, mappings map[string][]int) error {
+	var errs []error
+	for svcName, ports := range mappings {
+		tcpPorts := make([]string, len(ports))
+		for i, p := range ports {
+			tcpPorts[i] = fmt.Sprintf("tcp:%d", p)
+		}
 
-	svc := tailscale.VIPService{
-		Name:    m.serviceName,
-		Tags:    m.serviceTags,
-		Ports:   tcpPorts,
-		Comment: "Managed by Tailvoy",
-	}
+		svc := tailscale.VIPService{
+			Name:    svcName,
+			Tags:    mm.serviceTags,
+			Ports:   tcpPorts,
+			Comment: "Managed by Tailvoy",
+		}
 
-	// When updating an existing service, the API requires addrs to be included.
-	// Fetch existing service to preserve allocated addresses.
-	existing, err := m.client.VIPServices().Get(ctx, m.serviceName)
-	if err == nil && len(existing.Addrs) > 0 {
-		svc.Addrs = existing.Addrs
-	}
+		existing, err := mm.client.VIPServices().Get(ctx, svcName)
+		if err == nil && len(existing.Addrs) > 0 {
+			svc.Addrs = existing.Addrs
+		}
 
-	m.logger.Info("ensuring VIP service", "name", m.serviceName, "ports", ports, "tags", m.serviceTags)
-	if err := m.client.VIPServices().CreateOrUpdate(ctx, svc); err != nil {
-		return fmt.Errorf("create/update VIP service %s: %w", m.serviceName, err)
+		mm.logger.Info("ensuring VIP service", "name", svcName, "ports", ports)
+		if err := mm.client.VIPServices().CreateOrUpdate(ctx, svc); err != nil {
+			errs = append(errs, fmt.Errorf("create/update VIP service %s: %w", svcName, err))
+		}
 	}
-	return nil
-}
-
-func (m *Manager) Delete(ctx context.Context) error {
-	m.logger.Info("deleting VIP service", "name", m.serviceName)
-	if err := m.client.VIPServices().Delete(ctx, m.serviceName); err != nil {
-		return fmt.Errorf("delete VIP service %s: %w", m.serviceName, err)
-	}
-	return nil
-}
-
-func (m *Manager) ServiceName() string {
-	return m.serviceName
+	return errors.Join(errs...)
 }

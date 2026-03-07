@@ -1,9 +1,16 @@
 tailscale:
-  service: tailvoy-docker-test
+  hostname: tailvoy-docker-test-tailvoy
+  serviceMappings:
+    docker-http: [http]
+    docker-grpc: [grpc]
+    docker-tls: [tls]
+    docker-tcp: [tcp]
+    docker-udp: [udp]
+    docker-restricted: [no-access]
   tags:
     - tag:docker
   serviceTags:
-    - tag:docker
+    - tag:docker-svc
 
 listeners:
   http:

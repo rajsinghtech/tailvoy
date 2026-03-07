@@ -2,25 +2,30 @@
   "tagOwners": {
     "tag:user": [],
     "tag:docker": [],
-    "tag:kind": []
+    "tag:docker-svc": ["tag:docker"],
+    "tag:kind": [],
+    "tag:kind-svc": ["tag:kind"]
   },
   "autoApprovers": {
     "services": {
-      "svc:docker": ["tag:docker"],
-      "svc:kind": ["tag:kind"],
-      "svc:tailvoy-docker-test": ["tag:docker"],
-      "svc:tailvoy-kind-test": ["tag:kind"]
+      "svc:web": ["tag:docker"],
+      "svc:docker-http": ["tag:docker"],
+      "svc:docker-grpc": ["tag:docker"],
+      "svc:docker-tls": ["tag:docker"],
+      "svc:docker-tcp": ["tag:docker"],
+      "svc:docker-udp": ["tag:docker"],
+      "svc:docker-restricted": ["tag:docker"],
+      "svc:kind-http": ["tag:kind"],
+      "svc:kind-tcp": ["tag:kind"],
+      "svc:kind-grpc": ["tag:kind"],
+      "svc:kind-tls": ["tag:kind"]
     }
   },
   "grants": [
     {
-      "src": ["*"],
-      "dst": ["*"],
-      "ip": ["*"]
-    },
-    {
       "src": ["tag:user"],
-      "dst": ["tag:docker"],
+      "dst": ["tag:docker-svc", "tag:docker"],
+      "ip": ["*"],
       "app": {
         "rajsingh.info/cap/tailvoy": [
           {"listeners": ["http"], "routes": ["/public/*", "/health", "/api/*"]},
@@ -35,7 +40,8 @@
     },
     {
       "src": ["tag:user"],
-      "dst": ["tag:kind"],
+      "dst": ["tag:kind-svc", "tag:kind"],
+      "ip": ["*"],
       "app": {
         "rajsingh.info/cap/tailvoy": [
           {"listeners": ["http", "default/eg/http"], "hostnames": ["public.tailvoy.test"], "routes": ["/api/*", "/health"]},

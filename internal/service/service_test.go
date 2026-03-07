@@ -1,7 +1,6 @@
 package service
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -9,6 +8,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
+	"sync"
 	"testing"
 
 	tailscale "tailscale.com/client/tailscale/v2"
@@ -30,75 +31,82 @@ func testClient(t *testing.T, handler http.Handler) *tailscale.Client {
 	}
 }
 
-func TestManager_Ensure(t *testing.T) {
-	var (
-		gotMethod string
-		gotPath   string
-		gotBody   bytes.Buffer
-	)
+func TestMultiManager_EnsureAll(t *testing.T) {
+	var mu sync.Mutex
+	calls := map[string][]string{}
 
 	client := testClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotMethod = r.Method
-		gotPath = r.URL.Path
-		io.Copy(&gotBody, r.Body)
+		mu.Lock()
+		defer mu.Unlock()
+		if r.Method == http.MethodPut {
+			var svc tailscale.VIPService
+			body, _ := io.ReadAll(r.Body)
+			json.Unmarshal(body, &svc)
+			calls[svc.Name] = svc.Ports
+		}
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	mgr := New(client, "svc:test-service", []string{"tag:web", "tag:prod"}, slog.Default())
-	if err := mgr.Ensure(context.Background(), []string{"443", "80"}); err != nil {
-		t.Fatalf("Ensure() error: %v", err)
+	mm := NewMultiManager(client, []string{"tag:svc"}, slog.Default())
+	mappings := map[string][]int{
+		"svc:web":      {80, 443},
+		"svc:postgres": {5432},
+	}
+	if err := mm.EnsureAll(context.Background(), mappings); err != nil {
+		t.Fatalf("EnsureAll: %v", err)
 	}
 
-	if gotMethod != http.MethodPut {
-		t.Errorf("expected PUT, got %s", gotMethod)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 service calls, got %d", len(calls))
 	}
-	if want := "/api/v2/tailnet/test.example.com/vip-services/svc:test-service"; gotPath != want {
-		t.Errorf("path = %q, want %q", gotPath, want)
+	webPorts := calls["svc:web"]
+	if len(webPorts) != 2 {
+		t.Errorf("web ports = %v, want 2 entries", webPorts)
 	}
-
-	var received tailscale.VIPService
-	if err := json.Unmarshal(gotBody.Bytes(), &received); err != nil {
-		t.Fatalf("unmarshal body: %v", err)
-	}
-	if received.Comment != "Managed by Tailvoy" {
-		t.Errorf("comment = %q, want %q", received.Comment, "Managed by Tailvoy")
-	}
-	if len(received.Tags) != 2 || received.Tags[0] != "tag:web" || received.Tags[1] != "tag:prod" {
-		t.Errorf("tags = %v, want [tag:web tag:prod]", received.Tags)
-	}
-	if len(received.Ports) != 2 || received.Ports[0] != "tcp:443" || received.Ports[1] != "tcp:80" {
-		t.Errorf("ports = %v, want [tcp:443 tcp:80]", received.Ports)
+	pgPorts := calls["svc:postgres"]
+	if len(pgPorts) != 1 {
+		t.Errorf("postgres ports = %v, want 1 entry", pgPorts)
 	}
 }
 
-func TestManager_Delete(t *testing.T) {
-	var (
-		gotMethod string
-		gotPath   string
-	)
+func TestMultiManager_EnsureAll_PartialFailure(t *testing.T) {
+	var mu sync.Mutex
+	created := map[string]bool{}
 
 	client := testClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotMethod = r.Method
-		gotPath = r.URL.Path
+		mu.Lock()
+		defer mu.Unlock()
+		if r.Method == http.MethodPut {
+			var svc tailscale.VIPService
+			body, _ := io.ReadAll(r.Body)
+			json.Unmarshal(body, &svc)
+			if strings.Contains(svc.Name, "fail") {
+				http.Error(w, "server error", http.StatusInternalServerError)
+				return
+			}
+			created[svc.Name] = true
+		}
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	mgr := New(client, "svc:test-service", nil, slog.Default())
-	if err := mgr.Delete(context.Background()); err != nil {
-		t.Fatalf("Delete() error: %v", err)
+	mm := NewMultiManager(client, []string{"tag:svc"}, slog.Default())
+	mappings := map[string][]int{
+		"svc:web":  {80},
+		"svc:fail": {5432},
+	}
+	err := mm.EnsureAll(context.Background(), mappings)
+	if err == nil {
+		t.Fatal("expected error from partial failure")
+	}
+	if !strings.Contains(err.Error(), "svc:fail") {
+		t.Errorf("error should mention failing service, got: %v", err)
 	}
 
-	if gotMethod != http.MethodDelete {
-		t.Errorf("expected DELETE, got %s", gotMethod)
-	}
-	if want := "/api/v2/tailnet/test.example.com/vip-services/svc:test-service"; gotPath != want {
-		t.Errorf("path = %q, want %q", gotPath, want)
-	}
-}
-
-func TestManager_ServiceName(t *testing.T) {
-	mgr := New(nil, "svc:my-svc", nil, slog.Default())
-	if got := mgr.ServiceName(); got != "svc:my-svc" {
-		t.Errorf("ServiceName() = %q, want %q", got, "svc:my-svc")
+	mu.Lock()
+	defer mu.Unlock()
+	if !created["svc:web"] {
+		t.Error("svc:web should have been created despite svc:fail failing")
 	}
 }

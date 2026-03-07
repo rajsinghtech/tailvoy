@@ -3,9 +3,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-PASS=0
-FAIL=0
-TESTS=()
+# shellcheck source=../lib.sh
+source "$SCRIPT_DIR/../lib.sh"
 
 cleanup() {
     echo ""
@@ -14,19 +13,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-test_pass() {
-    echo "  PASS: $1"
-    PASS=$((PASS + 1))
-    TESTS+=("PASS: $1")
-}
-
-test_fail() {
-    echo "  FAIL: $1: $2"
-    FAIL=$((FAIL + 1))
-    TESTS+=("FAIL: $1: $2")
-}
-
-# --- Check prerequisites ---
+# --- Load env ---
 if [ -z "${TS_CLIENT_ID:-}" ] || [ -z "${TS_CLIENT_SECRET:-}" ]; then
     if [ -f "$SCRIPT_DIR/../.env" ]; then
         export $(grep -v '^#' "$SCRIPT_DIR/../.env" | xargs)
@@ -40,7 +27,7 @@ fi
 if [ -z "${TS_CLIENT_ID:-}" ]; then echo "FATAL: TS_CLIENT_ID is empty"; exit 1; fi
 if [ -z "${TS_CLIENT_SECRET:-}" ]; then echo "FATAL: TS_CLIENT_SECRET is empty"; exit 1; fi
 
-# --- Build and start Docker stack ---
+# --- Build and start ---
 echo "=== Building Docker images ==="
 docker compose -f "$SCRIPT_DIR/docker-compose.yaml" build 2>&1 | tail -5
 
@@ -49,6 +36,7 @@ docker compose -f "$SCRIPT_DIR/docker-compose.yaml" up -d 2>&1
 
 # --- Wait for tailnet join ---
 echo "=== Waiting for tailnet join ==="
+NODE_IP=""
 for i in $(seq 1 60); do
     NODE_IP=$(tailscale status --json 2>/dev/null \
         | jq -r '.Peer[] | select(.HostName == "tailvoy-l7-test-tailvoy") | .TailscaleIPs[0]' 2>/dev/null || true)
@@ -64,58 +52,49 @@ if [ -z "$NODE_IP" ] || [ "$NODE_IP" = "null" ]; then
     exit 1
 fi
 
-# Use node IP for tests — tailvoy listens on both VIP service and node IP.
-TAILVOY_IP="$NODE_IP"
+# --- Resolve VIP service ---
+DNS_SUFFIX=$(get_dns_suffix)
+echo "MagicDNS suffix: $DNS_SUFFIX"
+
+SVC="web.$DNS_SUFFIX"
+wait_dns "$SVC" 60
+
+TAILVOY_IP="$SVC"
+echo "Testing against: $TAILVOY_IP (node: $NODE_IP)"
 sleep 5
 
-# --- L7 Tests ---
-echo ""
-echo "=== L7 Tests ==="
+# =====================================================
+section "L7 PATH ROUTING"
+# =====================================================
 
-# /public/* → ALLOW (any_tailscale)
-echo "Test: /public/* allow (any_tailscale)"
-HTTP=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 10 "http://$TAILVOY_IP:80/public/hello" 2>&1 || true)
-if [ "$HTTP" = "200" ]; then test_pass "/public/* allow"; else test_fail "/public/* allow" "got $HTTP"; fi
+assert_http "/public/* allow" "http://$TAILVOY_IP:80/public/hello" "200"
+assert_http "/public/nested/path allow (wildcard)" "http://$TAILVOY_IP:80/public/nested/path" "200"
+assert_http "/user-only/* allow (specific user)" "http://$TAILVOY_IP:80/user-only/data" "200"
+assert_http "/admin/* deny (missing tag)" "http://$TAILVOY_IP:80/admin/settings" "403"
+assert_http "/unknown deny (default:deny)" "http://$TAILVOY_IP:80/unknown" "403"
 
-# /user-only/* → ALLOW (rajsinghtech@github)
-echo "Test: /user-only/* allow (specific user)"
-HTTP=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 10 "http://$TAILVOY_IP:80/user-only/data" 2>&1 || true)
-if [ "$HTTP" = "200" ]; then test_pass "/user-only/* allow"; else test_fail "/user-only/* allow" "got $HTTP"; fi
+# =====================================================
+section "IDENTITY HEADERS"
+# =====================================================
 
-# /admin/* → DENY (requires nonexistent tag)
-echo "Test: /admin/* deny (missing tag)"
-HTTP=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 10 "http://$TAILVOY_IP:80/admin/settings" 2>&1 || true)
-if [ "$HTTP" = "403" ]; then test_pass "/admin/* deny"; else test_fail "/admin/* deny" "expected 403, got $HTTP"; fi
-
-# /unknown → DENY (default:deny)
-echo "Test: /unknown deny (default:deny)"
-HTTP=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 10 "http://$TAILVOY_IP:80/unknown" 2>&1 || true)
-if [ "$HTTP" = "403" ]; then test_pass "default deny"; else test_fail "default deny" "expected 403, got $HTTP"; fi
-
-# Wildcard nesting
-echo "Test: /public/nested/path allow (wildcard)"
-HTTP=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 10 "http://$TAILVOY_IP:80/public/nested/path" 2>&1 || true)
-if [ "$HTTP" = "200" ]; then test_pass "nested wildcard"; else test_fail "nested wildcard" "got $HTTP"; fi
-
-# Identity headers on allowed request
-echo "Test: identity headers injected"
 BODY=$(curl -sf --max-time 10 "http://$TAILVOY_IP:80/public/headers" 2>&1 || true)
-USER_HDR=$(echo "$BODY" | jq -r '.headers["X-Tailscale-User"]' 2>/dev/null || true)
-TAGS_HDR=$(echo "$BODY" | jq -r '.headers["X-Tailscale-Tags"]' 2>/dev/null || true)
-NODE_HDR=$(echo "$BODY" | jq -r '.headers["X-Tailscale-Node"]' 2>/dev/null || true)
-IP_HDR=$(echo "$BODY" | jq -r '.headers["X-Tailscale-Ip"]' 2>/dev/null || true)
-if [ -n "$USER_HDR" ] && [ "$USER_HDR" != "null" ]; then
-    test_pass "x-tailscale identity (user)"
-elif [ -n "$TAGS_HDR" ] && [ "$TAGS_HDR" != "null" ] && [ "$TAGS_HDR" != "" ]; then
-    test_pass "x-tailscale identity (tagged node)"
+USER_HDR=$(echo "$BODY" | jq -r '.headers["X-Tailscale-User"] // empty' 2>/dev/null || true)
+TAGS_HDR=$(echo "$BODY" | jq -r '.headers["X-Tailscale-Tags"] // empty' 2>/dev/null || true)
+NODE_HDR=$(echo "$BODY" | jq -r '.headers["X-Tailscale-Node"] // empty' 2>/dev/null || true)
+IP_HDR=$(echo "$BODY" | jq -r '.headers["X-Tailscale-Ip"] // empty' 2>/dev/null || true)
+
+if [ -n "$USER_HDR" ] || [ -n "$TAGS_HDR" ]; then
+    test_pass "x-tailscale-user or x-tailscale-tags present"
 else
     test_fail "x-tailscale identity" "no user or tags found"
 fi
-if [ -n "$NODE_HDR" ] && [ "$NODE_HDR" != "null" ]; then test_pass "x-tailscale-node header"; else test_fail "x-tailscale-node header" "empty"; fi
-if [ -n "$IP_HDR" ] && [ "$IP_HDR" != "null" ]; then test_pass "x-tailscale-ip header"; else test_fail "x-tailscale-ip header" "empty"; fi
+if [ -n "$NODE_HDR" ]; then test_pass "x-tailscale-node present"; else test_fail "x-tailscale-node" "empty"; fi
+if [ -n "$IP_HDR" ]; then test_pass "x-tailscale-ip present"; else test_fail "x-tailscale-ip" "empty"; fi
 
-# Concurrent L7 requests
-echo "Test: concurrent L7 requests"
+# =====================================================
+section "CONCURRENT L7"
+# =====================================================
+
 OK=0
 for i in $(seq 1 10); do
     HTTP=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 10 "http://$TAILVOY_IP:80/public/$i" 2>&1 || true)
@@ -123,9 +102,5 @@ for i in $(seq 1 10); do
 done
 if [ "$OK" -eq 10 ]; then test_pass "10 concurrent L7"; else test_fail "10 concurrent L7" "$OK/10"; fi
 
-# --- Results ---
-echo ""
-echo "=== Results ==="
-echo "Passed: $PASS / $((PASS + FAIL))"
-for t in "${TESTS[@]}"; do echo "  $t"; done
-if [ "$FAIL" -gt 0 ]; then exit 1; fi
+# =====================================================
+print_results

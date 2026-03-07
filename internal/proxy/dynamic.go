@@ -10,7 +10,6 @@ import (
 
 	proxyproto "github.com/pires/go-proxyproto"
 	"github.com/rajsinghtech/tailvoy/internal/config"
-	"github.com/rajsinghtech/tailvoy/internal/service"
 )
 
 // TSNetServer abstracts the tsnet.Server methods used by DynamicListenerManager.
@@ -22,11 +21,10 @@ type TSNetServer interface {
 // DynamicListenerManager reconciles tsnet listeners against a desired set
 // of FlatListener entries, starting and stopping listeners as needed.
 type DynamicListenerManager struct {
-	ts          TSNetServer
-	listenerMgr *ListenerManager
-	svcMgr      *service.Manager
-	svcName     string
-	logger      *slog.Logger
+	ts                TSNetServer
+	listenerMgr       *ListenerManager
+	listenerToService map[string]string
+	logger            *slog.Logger
 
 	mu     sync.Mutex
 	active map[string]*dynamicListener
@@ -37,14 +35,13 @@ type dynamicListener struct {
 	cancel context.CancelFunc
 }
 
-func NewDynamicListenerManager(ts TSNetServer, lm *ListenerManager, svcMgr *service.Manager, svcName string, logger *slog.Logger) *DynamicListenerManager {
+func NewDynamicListenerManager(ts TSNetServer, lm *ListenerManager, listenerToService map[string]string, logger *slog.Logger) *DynamicListenerManager {
 	return &DynamicListenerManager{
-		ts:          ts,
-		listenerMgr: lm,
-		svcMgr:      svcMgr,
-		svcName:     svcName,
-		logger:      logger,
-		active:      make(map[string]*dynamicListener),
+		ts:                ts,
+		listenerMgr:       lm,
+		listenerToService: listenerToService,
+		logger:            logger,
+		active:            make(map[string]*dynamicListener),
 	}
 }
 
@@ -59,16 +56,6 @@ func (dm *DynamicListenerManager) Reconcile(ctx context.Context, desired []confi
 			continue
 		}
 		tcpDesired = append(tcpDesired, fl)
-	}
-
-	if dm.svcMgr != nil && len(tcpDesired) > 0 {
-		var ports []string
-		for _, fl := range tcpDesired {
-			ports = append(ports, strconv.Itoa(fl.Port))
-		}
-		if err := dm.svcMgr.Ensure(ctx, ports); err != nil {
-			return fmt.Errorf("ensure VIP service: %w", err)
-		}
 	}
 
 	desiredMap := make(map[string]config.FlatListener, len(tcpDesired))
@@ -96,7 +83,12 @@ func (dm *DynamicListenerManager) Reconcile(ctx context.Context, desired []confi
 		if _, exists := dm.active[fl.Name]; exists {
 			continue
 		}
-		if err := dm.startListener(ctx, fl); err != nil {
+		svcName := dm.listenerToService[fl.Name]
+		if svcName == "" {
+			dm.logger.Warn("unmapped listener skipped", "name", fl.Name)
+			continue
+		}
+		if err := dm.startListener(ctx, fl, svcName); err != nil {
 			errs = append(errs, fmt.Errorf("start %s: %w", fl.Name, err))
 		}
 	}
@@ -107,18 +99,18 @@ func (dm *DynamicListenerManager) Reconcile(ctx context.Context, desired []confi
 	return nil
 }
 
-func (dm *DynamicListenerManager) startListener(parentCtx context.Context, fl config.FlatListener) error {
+func (dm *DynamicListenerManager) startListener(parentCtx context.Context, fl config.FlatListener, svcName string) error {
 	lctx, cancel := context.WithCancel(parentCtx)
 
 	port := uint16(fl.Port)
 
-	rawSvcLn, err := dm.ts.ListenTCPService(dm.svcName, port)
+	rawSvcLn, err := dm.ts.ListenTCPService(svcName, port)
 	if err != nil {
 		cancel()
 		return fmt.Errorf("listen service tcp %s: %w", fl.Name, err)
 	}
 	svcLn := &proxyproto.Listener{Listener: rawSvcLn}
-	dm.logger.Info("service listener started", "name", fl.Name, "service", dm.svcName, "port", port)
+	dm.logger.Info("service listener started", "name", fl.Name, "service", svcName, "port", port)
 	go func() {
 		if err := dm.listenerMgr.Serve(lctx, svcLn, &fl); err != nil {
 			dm.logger.Debug("service listener ended", "name", fl.Name, "err", err)

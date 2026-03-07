@@ -1,5 +1,7 @@
 tailscale:
-  service: tailvoy-integration-test
+  serviceMappings:
+    web: [web]
+    restricted: [restricted-port]
   tags:
     - tag:integration
   serviceTags:

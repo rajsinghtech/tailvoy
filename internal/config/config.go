@@ -18,6 +18,8 @@ const (
 	ProtocolTLS   = "tls"
 	ProtocolTCP   = "tcp"
 	ProtocolUDP   = "udp"
+
+	ServicePrefix = "svc:"
 )
 
 var envVarRe = regexp.MustCompile(`\$\{([^}]+)\}`)
@@ -55,15 +57,32 @@ func (d *DiscoveryConfig) ParsedPollInterval() time.Duration {
 }
 
 type TailscaleConfig struct {
-	Service      string   `yaml:"service"`
-	Tags         []string `yaml:"tags"`
-	ServiceTags  []string `yaml:"serviceTags"`
-	ClientID     string   `yaml:"-"`
-	ClientSecret string   `yaml:"-"`
+	Service         string              `yaml:"service,omitempty"`
+	ServiceMappings map[string][]string `yaml:"serviceMappings"`
+	Tags            []string            `yaml:"tags"`
+	ServiceTags     []string            `yaml:"serviceTags"`
+	HostnameVal     string              `yaml:"hostname,omitempty"`
+	ClientID        string              `yaml:"-"`
+	ClientSecret    string              `yaml:"-"`
 }
 
-func (t *TailscaleConfig) Hostname() string    { return t.Service + "-tailvoy" }
-func (t *TailscaleConfig) ServiceName() string { return "svc:" + t.Service }
+func (t *TailscaleConfig) Hostname() string {
+	if t.HostnameVal != "" {
+		return t.HostnameVal
+	}
+	return "tailvoy-proxy"
+}
+
+// ListenerServiceMap returns a map from listener name to full service name (e.g. "svc:web").
+func (t *TailscaleConfig) ListenerServiceMap() map[string]string {
+	out := make(map[string]string)
+	for svcName, listeners := range t.ServiceMappings {
+		for _, ln := range listeners {
+			out[ln] = ServicePrefix + svcName
+		}
+	}
+	return out
+}
 
 type Listener struct {
 	Port     int        `yaml:"port"`
@@ -124,8 +143,11 @@ func Parse(data []byte) (*Config, error) {
 
 func (c *Config) validate() error {
 	ts := &c.Tailscale
-	if ts.Service == "" {
-		return fmt.Errorf("tailscale.service is required")
+	if ts.Service != "" {
+		return fmt.Errorf("tailscale.service has been replaced by tailscale.serviceMappings")
+	}
+	if len(ts.ServiceMappings) == 0 {
+		return fmt.Errorf("tailscale.serviceMappings is required")
 	}
 	if len(ts.Tags) == 0 {
 		return fmt.Errorf("tailscale.tags is required")
@@ -161,6 +183,33 @@ func (c *Config) validate() error {
 	for _, name := range names {
 		if err := validateListener(name, c.Listeners[name], usedPorts); err != nil {
 			return err
+		}
+	}
+
+	if c.Discovery == nil {
+		if err := c.validateServiceMappings(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *Config) validateServiceMappings() error {
+	seen := make(map[string]string)
+	for svcName, listeners := range c.Tailscale.ServiceMappings {
+		for _, ln := range listeners {
+			if _, ok := c.Listeners[ln]; !ok {
+				return fmt.Errorf("service mapping %q references unknown listener %q", svcName, ln)
+			}
+			if prev, dup := seen[ln]; dup {
+				return fmt.Errorf("listener %q appears in multiple service mappings: %q and %q", ln, prev, svcName)
+			}
+			seen[ln] = svcName
+		}
+	}
+	for name := range c.Listeners {
+		if _, ok := seen[name]; !ok {
+			return fmt.Errorf("listener %q is not in any service mapping", name)
 		}
 	}
 	return nil

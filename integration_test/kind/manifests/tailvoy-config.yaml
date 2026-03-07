@@ -6,11 +6,16 @@ metadata:
 data:
   config.yaml: |
     tailscale:
-      service: tailvoy-kind-test
+      hostname: tailvoy-kind-test-tailvoy
+      serviceMappings:
+        kind-http: [default/eg/http]
+        kind-tcp: [default/eg/tcp]
+        kind-grpc: [default/eg/grpc]
+        kind-tls: [default/eg/tls]
       tags:
         - tag:kind
       serviceTags:
-        - tag:kind
+        - tag:kind-svc
     discovery:
       envoyAdmin: http://127.0.0.1:19000
       envoyAddress: 127.0.0.1

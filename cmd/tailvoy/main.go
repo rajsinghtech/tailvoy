@@ -104,7 +104,6 @@ func run(args []string) error {
 		return fmt.Errorf("local client: %w", err)
 	}
 
-	svcMgr := service.New(tsClient, cfg.Tailscale.ServiceName(), cfg.Tailscale.ServiceTags, logger)
 	engine := policy.NewEngine()
 	resolver := identity.NewResolver(lc)
 	defer resolver.Close()
@@ -132,21 +131,39 @@ func run(args []string) error {
 		tsIP = ip4.String()
 	}
 
+	listenerToService := cfg.Tailscale.ListenerServiceMap()
+
 	if cfg.Discovery != nil {
-		// Discovery mode: poll Envoy admin API and reconcile listeners dynamically.
 		disc, err := discovery.New(cfg.Discovery, logger)
 		if err != nil {
 			cancel()
 			wg.Wait()
 			return fmt.Errorf("discovery setup: %w", err)
 		}
-		dynMgr := proxy.NewDynamicListenerManager(&tsnetAdapter{ts}, listenerMgr, svcMgr, cfg.Tailscale.ServiceName(), logger)
+
+		svcMgr := service.NewMultiManager(tsClient, cfg.Tailscale.ServiceTags, logger)
+		dynMgr := proxy.NewDynamicListenerManager(&tsnetAdapter{ts}, listenerMgr, listenerToService, logger)
 
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			defer dynMgr.StopAll()
 			for listeners := range disc.Watch(ctx) {
+				// Ensure VIP services for discovered listeners.
+				portsByService := make(map[string][]int)
+				for _, fl := range listeners {
+					if fl.Transport == config.ProtocolUDP {
+						continue
+					}
+					svc := listenerToService[fl.Name]
+					if svc == "" {
+						continue // unmapped listeners are warned about in Reconcile
+					}
+					portsByService[svc] = append(portsByService[svc], fl.Port)
+				}
+				if err := svcMgr.EnsureAll(ctx, portsByService); err != nil {
+					logger.Error("ensure VIP services error", "err", err)
+				}
 				if err := dynMgr.Reconcile(ctx, listeners); err != nil {
 					logger.Error("reconcile error", "err", err)
 				}
@@ -194,31 +211,39 @@ func run(args []string) error {
 		envoyArgs = append([]string{"-c", tmpFile.Name()}, envoyArgs...)
 		logger.Info("generated standalone envoy config", "path", tmpFile.Name())
 
-		svcName := cfg.Tailscale.ServiceName()
-
-		var tcpPorts []string
-		var tcpFLs []config.FlatListener
+		// Build per-service port mappings and separate UDP listeners.
+		portsByService := make(map[string][]int)
 		var udpFLs []config.FlatListener
-		for _, fl := range flat {
+		type tcpEntry struct {
+			name    string
+			fl      config.FlatListener
+			svcName string
+		}
+		var tcpEntries []tcpEntry
+
+		for name, fl := range flat {
 			if fl.Transport == config.ProtocolUDP {
 				logger.Warn("UDP listener has no VIP service support, node IP only", "listener", fl.Name)
 				udpFLs = append(udpFLs, fl)
 				continue
 			}
-			tcpPorts = append(tcpPorts, strconv.Itoa(fl.Port))
-			tcpFLs = append(tcpFLs, fl)
+			svc := listenerToService[name]
+			portsByService[svc] = append(portsByService[svc], fl.Port)
+			tcpEntries = append(tcpEntries, tcpEntry{name: name, fl: fl, svcName: svc})
 		}
 
-		if len(tcpPorts) > 0 {
-			if err := svcMgr.Ensure(ctx, tcpPorts); err != nil {
-				cancel()
-				wg.Wait()
-				return fmt.Errorf("ensure VIP service: %w", err)
-			}
+		// Ensure all VIP services.
+		svcMgr := service.NewMultiManager(tsClient, cfg.Tailscale.ServiceTags, logger)
+		if err := svcMgr.EnsureAll(ctx, portsByService); err != nil {
+			cancel()
+			wg.Wait()
+			return fmt.Errorf("ensure VIP services: %w", err)
 		}
 
-		for _, fl := range tcpFLs {
-			fl := fl
+		// Start TCP listeners with per-service VIPs.
+		for _, entry := range tcpEntries {
+			fl := entry.fl
+			svcName := entry.svcName
 			port := uint16(fl.Port)
 
 			rawSvcLn, err := ts.ListenService(svcName, tsnet.ServiceModeTCP{

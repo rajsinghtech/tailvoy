@@ -24,7 +24,8 @@ Create `config.yaml`:
 
 ```yaml
 tailscale:
-  service: "my-gw"
+  serviceMappings:
+    web: [http]
   tags: ["tag:my-gw"]
   serviceTags: ["tag:my-gw"]
 
@@ -47,11 +48,11 @@ docker run \
   -config /config.yaml
 ```
 
-tailvoy connects to the tailnet, creates a VIP service, generates Envoy config, and starts proxying. Authorization is controlled entirely by your Tailscale ACL -- the config file only defines infrastructure.
+tailvoy connects to the tailnet, creates VIP services per service mapping, generates Envoy config, and starts proxying. Authorization is controlled entirely by your Tailscale ACL -- the config file defines infrastructure and service identity.
 
 ## How it works
 
-tailvoy embeds [tsnet](https://pkg.go.dev/tailscale.com/tsnet) to join the tailnet as an ephemeral OAuth node. It uses [Tailscale Services](https://tailscale.com/docs/features/tailscale-services) (`tsnet.ListenService`) so multiple replicas serve the same stable address. Every connection triggers a WhoIs lookup to resolve the caller's identity and peer capabilities.
+tailvoy embeds [tsnet](https://pkg.go.dev/tailscale.com/tsnet) to join the tailnet as an ephemeral OAuth node. It uses [Tailscale Services](https://tailscale.com/docs/features/tailscale-services) (`tsnet.ListenService`) with per-service VIPs so each service mapping gets its own stable address and multiple replicas can serve it. Every connection triggers a WhoIs lookup to resolve the caller's identity and peer capabilities.
 
 Authorization uses the `rajsingh.info/cap/tailvoy` capability with three dimensions:
 
@@ -151,9 +152,12 @@ spec:
 
 ```yaml
 tailscale:
-  service: "my-gw"          # VIP service name: svc:my-gw, node hostname: my-gw-tailvoy
-  tags: ["tag:my-gw"]       # ACL tags for the tsnet node
-  serviceTags: ["tag:my-gw"] # ACL tags for the VIP service
+  serviceMappings:            # map of service name -> listener names
+    web: [http, https]        # svc:web serves ports 80 + 443
+    postgres: [db]            # svc:postgres serves port 5432
+  tags: ["tag:my-gw"]        # ACL tags for the tsnet node
+  serviceTags: ["tag:my-gw"] # ACL tags for VIP services
+  hostname: tailvoy-proxy    # optional: tsnet node hostname (default: tailvoy-proxy)
 ```
 
 Credentials are read from `TS_CLIENT_ID` and `TS_CLIENT_SECRET` environment variables. Your ACL must include:
@@ -161,7 +165,12 @@ Credentials are read from `TS_CLIENT_ID` and `TS_CLIENT_SECRET` environment vari
 ```jsonc
 {
     "tagOwners": { "tag:my-gw": ["autogroup:admin"] },
-    "autoApprovers": { "services": { "svc:my-gw": ["tag:my-gw"] } }
+    "autoApprovers": {
+        "services": {
+            "svc:web": ["tag:my-gw"],
+            "svc:postgres": ["tag:my-gw"]
+        }
+    }
 }
 ```
 
@@ -233,6 +242,13 @@ listeners:
 Instead of static listeners, tailvoy can poll Envoy's admin API to auto-discover listeners. Mutually exclusive with `listeners`.
 
 ```yaml
+tailscale:
+  serviceMappings:
+    http: ["default/eg/http"]
+    tcp: ["default/eg/tcp"]
+  tags: ["tag:my-gw"]
+  serviceTags: ["tag:my-gw"]
+
 discovery:
   envoyAdmin: "http://127.0.0.1:19000"
   envoyAddress: "127.0.0.1"
@@ -240,6 +256,8 @@ discovery:
   proxyProtocol: v2
   listenerFilter: "default/eg/.*"      # optional: regex to include only matching names
 ```
+
+In discovery mode, `serviceMappings` maps Envoy Gateway listener names (format: `<namespace>/<gateway>/<listener>`) to VIP service names. Discovered listeners not in any mapping are skipped with a warning.
 
 Discovered listener names follow Envoy Gateway convention: `<namespace>/<gateway>/<listener>`. Use these names in ACL grants and SecurityPolicy `contextExtensions`:
 
@@ -289,6 +307,15 @@ An empty rule `[{}]` grants unrestricted access.
 A single tailvoy instance with scoped access per team:
 
 ```yaml
+tailscale:
+  serviceMappings:
+    http: [http]
+    grpc: [grpc]
+    postgres: [postgres]
+    tls: [tls]
+  tags: ["tag:my-gw"]
+  serviceTags: ["tag:my-gw"]
+
 listeners:
   http:
     port: 80
@@ -317,28 +344,25 @@ listeners:
     "grants": [
         {
             // Frontend: HTTP + gRPC health only
-            "src": ["tag:frontend"], "dst": ["tag:my-gw"],
+            "src": ["tag:frontend"], "dst": ["svc:http", "svc:grpc"],
             "app": { "rajsingh.info/cap/tailvoy": [{
-                "listeners": ["http", "grpc"],
                 "routes": ["/api/*", "/grpc.health.v1.Health/*"]
             }]}
         },
         {
             // DBA: postgres only
-            "src": ["tag:dba"], "dst": ["tag:my-gw"],
-            "app": { "rajsingh.info/cap/tailvoy": [{"listeners": ["postgres"]}] }
+            "src": ["tag:dba"], "dst": ["svc:postgres"]
         },
         {
             // Engineers: TLS to app.example.com only
-            "src": ["group:engineers"], "dst": ["tag:my-gw"],
+            "src": ["group:engineers"], "dst": ["svc:tls"],
             "app": { "rajsingh.info/cap/tailvoy": [{
-                "listeners": ["tls"],
                 "hostnames": ["app.example.com"]
             }]}
         },
         {
-            // Ops: full access
-            "src": ["group:ops"], "dst": ["tag:my-gw"],
+            // Ops: all services
+            "src": ["group:ops"], "dst": ["svc:http", "svc:grpc", "svc:postgres", "svc:tls"],
             "app": { "rajsingh.info/cap/tailvoy": [{}] }
         }
     ]

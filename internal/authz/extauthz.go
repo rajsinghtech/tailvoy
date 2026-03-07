@@ -65,7 +65,7 @@ func (s *Server) Check(ctx context.Context, req *authv3.CheckRequest) (*authv3.C
 	if !s.engine.CheckAccess(listener, host, path, id) {
 		s.logger.Info("ext_authz: denied",
 			"ip", srcIP, "path", path, "host", host, "listener", listener,
-			"user", id.UserLogin, "node", id.NodeName)
+			"user", id.UserLogin, "node", id.NodeName, "rules", len(id.Rules))
 		return denyResponse(), nil
 	}
 

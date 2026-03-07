@@ -1,9 +1,11 @@
 tailscale:
-  service: tailvoy-l7-test
+  hostname: tailvoy-l7-test-tailvoy
+  serviceMappings:
+    web: [web]
   tags:
     - tag:docker
   serviceTags:
-    - tag:docker
+    - tag:docker-svc
 
 listeners:
   web:

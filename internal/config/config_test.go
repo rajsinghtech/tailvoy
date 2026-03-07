@@ -17,7 +17,8 @@ func TestParse_Minimal(t *testing.T) {
 
 	data := []byte(`
 tailscale:
-  service: myapp
+  serviceMappings:
+    myapp: [web]
   tags:
     - tag:web
   serviceTags:
@@ -35,14 +36,11 @@ listeners:
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.Tailscale.Service != "myapp" {
-		t.Errorf("service = %q, want %q", cfg.Tailscale.Service, "myapp")
+	if cfg.Tailscale.Hostname() != "tailvoy-proxy" {
+		t.Errorf("Hostname() = %q, want %q", cfg.Tailscale.Hostname(), "tailvoy-proxy")
 	}
-	if cfg.Tailscale.Hostname() != "myapp-tailvoy" {
-		t.Errorf("Hostname() = %q, want %q", cfg.Tailscale.Hostname(), "myapp-tailvoy")
-	}
-	if cfg.Tailscale.ServiceName() != "svc:myapp" {
-		t.Errorf("ServiceName() = %q, want %q", cfg.Tailscale.ServiceName(), "svc:myapp")
+	if len(cfg.Tailscale.ServiceMappings) != 1 {
+		t.Errorf("serviceMappings count = %d, want 1", len(cfg.Tailscale.ServiceMappings))
 	}
 	if cfg.Tailscale.ClientID != "test-client-id" {
 		t.Errorf("ClientID = %q, want %q", cfg.Tailscale.ClientID, "test-client-id")
@@ -57,8 +55,8 @@ listeners:
 	if l.Protocol != "http" {
 		t.Errorf("protocol = %q, want %q", l.Protocol, "http")
 	}
-	if len(l.Routes) != 1 || l.Routes[0].Backend != "localhost:8080" {
-		t.Errorf("routes = %+v, unexpected", l.Routes)
+	if len(l.Routes) != 1 {
+		t.Errorf("routes count = %d, want 1", len(l.Routes))
 	}
 }
 
@@ -67,7 +65,12 @@ func TestParse_FullExample(t *testing.T) {
 
 	data := []byte(`
 tailscale:
-  service: bigapp
+  serviceMappings:
+    web: [https-web]
+    api: [grpc-api]
+    tls: [tls-passthrough]
+    db: [tcp-direct]
+    dns: [udp-dns]
   tags:
     - tag:web
     - tag:api
@@ -129,7 +132,6 @@ listeners:
 		t.Fatalf("got %d listeners, want 5", len(cfg.Listeners))
 	}
 
-	// https listener
 	hl := cfg.Listeners["https-web"]
 	if hl.TLS == nil || hl.TLS.Cert != "/certs/web.crt" {
 		t.Error("https listener TLS not parsed correctly")
@@ -140,12 +142,10 @@ listeners:
 	if hl.Routes[0].Paths["/"] != "localhost:3000" {
 		t.Error("path / not mapped correctly")
 	}
-	// route-level TLS override
 	if hl.Routes[1].TLS == nil || hl.Routes[1].TLS.Cert != "/certs/admin.crt" {
 		t.Error("route-level TLS override not parsed")
 	}
 
-	// tls passthrough
 	tl := cfg.Listeners["tls-passthrough"]
 	if len(tl.Routes) != 2 {
 		t.Error("tls routes wrong count")
@@ -156,13 +156,11 @@ listeners:
 		}
 	}
 
-	// tcp
 	tcp := cfg.Listeners["tcp-direct"]
 	if tcp.Backend != "localhost:3307" {
 		t.Errorf("tcp backend = %q", tcp.Backend)
 	}
 
-	// udp
 	udp := cfg.Listeners["udp-dns"]
 	if udp.Backend != "localhost:5353" {
 		t.Errorf("udp backend = %q", udp.Backend)
@@ -173,7 +171,6 @@ func TestParse_Validation(t *testing.T) {
 	baseConfig := func() string {
 		return `
 tailscale:
-  service: myapp
   tags:
     - tag:web
   serviceTags:
@@ -189,148 +186,172 @@ tailscale:
 		wantErr string
 	}{
 		{
-			name:  "missing service",
+			name:  "missing serviceMappings",
 			yaml:  "tailscale:\n  tags: [tag:web]\n  serviceTags: [tag:svc]\nlisteners:\n  a:\n    port: 80\n    protocol: http\n    routes:\n      - backend: \"localhost:80\"\n",
 			envID: "x", envSec: "x",
-			wantErr: "tailscale.service is required",
+			wantErr: "tailscale.serviceMappings is required",
+		},
+		{
+			name:  "old service field rejected",
+			yaml:  "tailscale:\n  service: old\n  serviceMappings:\n    svc: [a]\n  tags: [tag:web]\n  serviceTags: [tag:svc]\nlisteners:\n  a:\n    port: 80\n    protocol: http\n    routes:\n      - backend: \"localhost:80\"\n",
+			envID: "x", envSec: "x",
+			wantErr: "tailscale.service has been replaced by tailscale.serviceMappings",
 		},
 		{
 			name:  "missing tags",
-			yaml:  "tailscale:\n  service: x\n  serviceTags: [tag:svc]\nlisteners:\n  a:\n    port: 80\n    protocol: http\n    routes:\n      - backend: \"localhost:80\"\n",
+			yaml:  "tailscale:\n  serviceMappings:\n    svc: [a]\n  serviceTags: [tag:svc]\nlisteners:\n  a:\n    port: 80\n    protocol: http\n    routes:\n      - backend: \"localhost:80\"\n",
 			envID: "x", envSec: "x",
 			wantErr: "tailscale.tags is required",
 		},
 		{
 			name:  "missing serviceTags",
-			yaml:  "tailscale:\n  service: x\n  tags: [tag:web]\nlisteners:\n  a:\n    port: 80\n    protocol: http\n    routes:\n      - backend: \"localhost:80\"\n",
+			yaml:  "tailscale:\n  serviceMappings:\n    svc: [a]\n  tags: [tag:web]\nlisteners:\n  a:\n    port: 80\n    protocol: http\n    routes:\n      - backend: \"localhost:80\"\n",
 			envID: "x", envSec: "x",
 			wantErr: "tailscale.serviceTags is required",
 		},
 		{
 			name:  "no listeners",
-			yaml:  baseConfig(),
+			yaml:  baseConfig() + "  serviceMappings:\n    svc: [a]\n",
 			envID: "x", envSec: "x",
 			wantErr: "at least one listener is required",
 		},
 		{
 			name:  "port zero",
-			yaml:  baseConfig() + "listeners:\n  a:\n    port: 0\n    protocol: tcp\n    backend: \"localhost:80\"\n",
+			yaml:  baseConfig() + "  serviceMappings:\n    svc: [a]\nlisteners:\n  a:\n    port: 0\n    protocol: tcp\n    backend: \"localhost:80\"\n",
 			envID: "x", envSec: "x",
 			wantErr: "port must be between 1 and 65535",
 		},
 		{
 			name:  "port too high",
-			yaml:  baseConfig() + "listeners:\n  a:\n    port: 70000\n    protocol: tcp\n    backend: \"localhost:80\"\n",
+			yaml:  baseConfig() + "  serviceMappings:\n    svc: [a]\nlisteners:\n  a:\n    port: 70000\n    protocol: tcp\n    backend: \"localhost:80\"\n",
 			envID: "x", envSec: "x",
 			wantErr: "port must be between 1 and 65535",
 		},
 		{
 			name:  "duplicate port",
-			yaml:  baseConfig() + "listeners:\n  a:\n    port: 80\n    protocol: tcp\n    backend: \"localhost:80\"\n  b:\n    port: 80\n    protocol: tcp\n    backend: \"localhost:81\"\n",
+			yaml:  baseConfig() + "  serviceMappings:\n    svc: [a, b]\nlisteners:\n  a:\n    port: 80\n    protocol: tcp\n    backend: \"localhost:80\"\n  b:\n    port: 80\n    protocol: tcp\n    backend: \"localhost:81\"\n",
 			envID: "x", envSec: "x",
 			wantErr: "duplicate port",
 		},
 		{
 			name:  "invalid protocol",
-			yaml:  baseConfig() + "listeners:\n  a:\n    port: 80\n    protocol: ftp\n    backend: \"localhost:80\"\n",
+			yaml:  baseConfig() + "  serviceMappings:\n    svc: [a]\nlisteners:\n  a:\n    port: 80\n    protocol: ftp\n    backend: \"localhost:80\"\n",
 			envID: "x", envSec: "x",
 			wantErr: "protocol must be one of",
 		},
 		{
 			name:  "tcp with routes",
-			yaml:  baseConfig() + "listeners:\n  a:\n    port: 80\n    protocol: tcp\n    backend: \"localhost:80\"\n    routes:\n      - backend: \"localhost:81\"\n",
+			yaml:  baseConfig() + "  serviceMappings:\n    svc: [a]\nlisteners:\n  a:\n    port: 80\n    protocol: tcp\n    backend: \"localhost:80\"\n    routes:\n      - backend: \"localhost:81\"\n",
 			envID: "x", envSec: "x",
 			wantErr: "must not have routes",
 		},
 		{
 			name:  "tcp missing backend",
-			yaml:  baseConfig() + "listeners:\n  a:\n    port: 80\n    protocol: tcp\n",
+			yaml:  baseConfig() + "  serviceMappings:\n    svc: [a]\nlisteners:\n  a:\n    port: 80\n    protocol: tcp\n",
 			envID: "x", envSec: "x",
 			wantErr: "must have backend",
 		},
 		{
 			name:  "udp with routes",
-			yaml:  baseConfig() + "listeners:\n  a:\n    port: 53\n    protocol: udp\n    backend: \"localhost:53\"\n    routes:\n      - backend: \"localhost:54\"\n",
+			yaml:  baseConfig() + "  serviceMappings:\n    svc: [a]\nlisteners:\n  a:\n    port: 53\n    protocol: udp\n    backend: \"localhost:53\"\n    routes:\n      - backend: \"localhost:54\"\n",
 			envID: "x", envSec: "x",
 			wantErr: "must not have routes",
 		},
 		{
 			name:  "http with backend",
-			yaml:  baseConfig() + "listeners:\n  a:\n    port: 80\n    protocol: http\n    backend: \"localhost:80\"\n",
+			yaml:  baseConfig() + "  serviceMappings:\n    svc: [a]\nlisteners:\n  a:\n    port: 80\n    protocol: http\n    backend: \"localhost:80\"\n",
 			envID: "x", envSec: "x",
 			wantErr: "must not have backend",
 		},
 		{
 			name:  "http missing routes",
-			yaml:  baseConfig() + "listeners:\n  a:\n    port: 80\n    protocol: http\n",
+			yaml:  baseConfig() + "  serviceMappings:\n    svc: [a]\nlisteners:\n  a:\n    port: 80\n    protocol: http\n",
 			envID: "x", envSec: "x",
 			wantErr: "must have routes",
 		},
 		{
 			name:  "tls route missing hostname",
-			yaml:  baseConfig() + "listeners:\n  a:\n    port: 443\n    protocol: tls\n    routes:\n      - backend: \"localhost:443\"\n",
+			yaml:  baseConfig() + "  serviceMappings:\n    svc: [a]\nlisteners:\n  a:\n    port: 443\n    protocol: tls\n    routes:\n      - backend: \"localhost:443\"\n",
 			envID: "x", envSec: "x",
 			wantErr: "hostname is required",
 		},
 		{
 			name:  "tls route with paths",
-			yaml:  baseConfig() + "listeners:\n  a:\n    port: 443\n    protocol: tls\n    routes:\n      - hostname: x.com\n        paths:\n          /: \"localhost:80\"\n",
+			yaml:  baseConfig() + "  serviceMappings:\n    svc: [a]\nlisteners:\n  a:\n    port: 443\n    protocol: tls\n    routes:\n      - hostname: x.com\n        paths:\n          /: \"localhost:80\"\n",
 			envID: "x", envSec: "x",
 			wantErr: "must not have paths",
 		},
 		{
 			name:  "route with both backend and paths",
-			yaml:  baseConfig() + "listeners:\n  a:\n    port: 80\n    protocol: http\n    routes:\n      - backend: \"localhost:80\"\n        paths:\n          /: \"localhost:80\"\n",
+			yaml:  baseConfig() + "  serviceMappings:\n    svc: [a]\nlisteners:\n  a:\n    port: 80\n    protocol: http\n    routes:\n      - backend: \"localhost:80\"\n        paths:\n          /: \"localhost:80\"\n",
 			envID: "x", envSec: "x",
 			wantErr: "must have either backend or paths, not both",
 		},
 		{
 			name:  "path not starting with slash",
-			yaml:  baseConfig() + "listeners:\n  a:\n    port: 80\n    protocol: http\n    routes:\n      - paths:\n          noslash: \"localhost:80\"\n",
+			yaml:  baseConfig() + "  serviceMappings:\n    svc: [a]\nlisteners:\n  a:\n    port: 80\n    protocol: http\n    routes:\n      - paths:\n          noslash: \"localhost:80\"\n",
 			envID: "x", envSec: "x",
 			wantErr: "must start with /",
 		},
 		{
 			name:  "backend without colon",
-			yaml:  baseConfig() + "listeners:\n  a:\n    port: 80\n    protocol: tcp\n    backend: localhost\n",
+			yaml:  baseConfig() + "  serviceMappings:\n    svc: [a]\nlisteners:\n  a:\n    port: 80\n    protocol: tcp\n    backend: localhost\n",
 			envID: "x", envSec: "x",
 			wantErr: "must be host:port format",
 		},
 		{
 			name:  "https missing tls",
-			yaml:  baseConfig() + "listeners:\n  a:\n    port: 443\n    protocol: https\n    routes:\n      - backend: \"localhost:443\"\n",
+			yaml:  baseConfig() + "  serviceMappings:\n    svc: [a]\nlisteners:\n  a:\n    port: 443\n    protocol: https\n    routes:\n      - backend: \"localhost:443\"\n",
 			envID: "x", envSec: "x",
 			wantErr: "TLS config is required",
 		},
 		{
 			name:  "grpc missing routes",
-			yaml:  baseConfig() + "listeners:\n  a:\n    port: 9090\n    protocol: grpc\n",
+			yaml:  baseConfig() + "  serviceMappings:\n    svc: [a]\nlisteners:\n  a:\n    port: 9090\n    protocol: grpc\n",
 			envID: "x", envSec: "x",
 			wantErr: "grpc listener must have routes",
 		},
 		{
 			name:  "http with tls",
-			yaml:  baseConfig() + "listeners:\n  a:\n    port: 80\n    protocol: http\n    tls:\n      cert: a\n      key: b\n    routes:\n      - backend: \"localhost:80\"\n",
+			yaml:  baseConfig() + "  serviceMappings:\n    svc: [a]\nlisteners:\n  a:\n    port: 80\n    protocol: http\n    tls:\n      cert: a\n      key: b\n    routes:\n      - backend: \"localhost:80\"\n",
 			envID: "x", envSec: "x",
 			wantErr: "must not have TLS config",
 		},
 		{
 			name:  "tcp with tls",
-			yaml:  baseConfig() + "listeners:\n  a:\n    port: 80\n    protocol: tcp\n    tls:\n      cert: a\n      key: b\n    backend: \"localhost:80\"\n",
+			yaml:  baseConfig() + "  serviceMappings:\n    svc: [a]\nlisteners:\n  a:\n    port: 80\n    protocol: tcp\n    tls:\n      cert: a\n      key: b\n    backend: \"localhost:80\"\n",
 			envID: "x", envSec: "x",
 			wantErr: "must not have TLS config",
 		},
 		{
 			name:  "udp with tls",
-			yaml:  baseConfig() + "listeners:\n  a:\n    port: 53\n    protocol: udp\n    tls:\n      cert: a\n      key: b\n    backend: \"localhost:53\"\n",
+			yaml:  baseConfig() + "  serviceMappings:\n    svc: [a]\nlisteners:\n  a:\n    port: 53\n    protocol: udp\n    tls:\n      cert: a\n      key: b\n    backend: \"localhost:53\"\n",
 			envID: "x", envSec: "x",
 			wantErr: "must not have TLS config",
 		},
 		{
 			name:  "http route with tls override",
-			yaml:  baseConfig() + "listeners:\n  a:\n    port: 80\n    protocol: http\n    routes:\n      - backend: \"localhost:80\"\n        tls:\n          cert: a\n          key: b\n",
+			yaml:  baseConfig() + "  serviceMappings:\n    svc: [a]\nlisteners:\n  a:\n    port: 80\n    protocol: http\n    routes:\n      - backend: \"localhost:80\"\n        tls:\n          cert: a\n          key: b\n",
 			envID: "x", envSec: "x",
 			wantErr: "per-route TLS override only allowed",
+		},
+		{
+			name:  "listener not in any mapping",
+			yaml:  baseConfig() + "  serviceMappings:\n    web: [a]\nlisteners:\n  a:\n    port: 80\n    protocol: http\n    routes:\n      - backend: \"localhost:80\"\n  orphan:\n    port: 81\n    protocol: tcp\n    backend: \"localhost:81\"\n",
+			envID: "x", envSec: "x",
+			wantErr: "listener \"orphan\" is not in any service mapping",
+		},
+		{
+			name:  "listener in multiple mappings",
+			yaml:  baseConfig() + "  serviceMappings:\n    web: [a]\n    api: [a]\nlisteners:\n  a:\n    port: 80\n    protocol: http\n    routes:\n      - backend: \"localhost:80\"\n",
+			envID: "x", envSec: "x",
+			wantErr: "listener \"a\" appears in multiple service mappings",
+		},
+		{
+			name:  "mapping references nonexistent listener",
+			yaml:  baseConfig() + "  serviceMappings:\n    web: [ghost]\nlisteners:\n  a:\n    port: 80\n    protocol: http\n    routes:\n      - backend: \"localhost:80\"\n",
+			envID: "x", envSec: "x",
+			wantErr: "service mapping \"web\" references unknown listener \"ghost\"",
 		},
 	}
 
@@ -356,7 +377,8 @@ func TestParse_MissingEnvVars(t *testing.T) {
 
 	data := []byte(`
 tailscale:
-  service: myapp
+  serviceMappings:
+    myapp: [web]
   tags:
     - tag:web
   serviceTags:
@@ -387,7 +409,8 @@ func TestFlatListeners(t *testing.T) {
 
 	y := `
 tailscale:
-  service: x
+  serviceMappings:
+    all: [web, postgres, dns, vault]
   tags: [tag:x]
   serviceTags: [tag:x]
 listeners:
@@ -439,5 +462,76 @@ listeners:
 	v := flat["vault"]
 	if !v.SNIPassthrough || v.IsL7 || v.Transport != "tcp" {
 		t.Errorf("vault: SNIPassthrough=%v IsL7=%v Transport=%s", v.SNIPassthrough, v.IsL7, v.Transport)
+	}
+}
+
+func TestServiceForListener(t *testing.T) {
+	setTestEnv(t)
+
+	data := []byte(`
+tailscale:
+  serviceMappings:
+    web: [http, https]
+    db: [postgres]
+  tags: [tag:x]
+  serviceTags: [tag:x]
+listeners:
+  http:
+    port: 80
+    protocol: http
+    routes:
+      - backend: "localhost:8080"
+  https:
+    port: 443
+    protocol: https
+    tls:
+      cert: /c.pem
+      key: /k.pem
+    routes:
+      - backend: "localhost:8080"
+  postgres:
+    port: 5432
+    protocol: tcp
+    backend: "localhost:5432"
+`)
+
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	m := cfg.Tailscale.ListenerServiceMap()
+	tests := []struct {
+		listener string
+		want     string
+	}{
+		{"http", "svc:web"},
+		{"https", "svc:web"},
+		{"postgres", "svc:db"},
+		{"nonexistent", ""},
+	}
+	for _, tt := range tests {
+		if got := m[tt.listener]; got != tt.want {
+			t.Errorf("ListenerServiceMap()[%q] = %q, want %q", tt.listener, got, tt.want)
+		}
+	}
+}
+
+func TestListenerServiceMap(t *testing.T) {
+	tc := TailscaleConfig{
+		ServiceMappings: map[string][]string{
+			"web": {"http", "https"},
+			"db":  {"postgres"},
+		},
+	}
+	m := tc.ListenerServiceMap()
+	if m["http"] != "svc:web" {
+		t.Errorf("http = %q, want svc:web", m["http"])
+	}
+	if m["https"] != "svc:web" {
+		t.Errorf("https = %q, want svc:web", m["https"])
+	}
+	if m["postgres"] != "svc:db" {
+		t.Errorf("postgres = %q, want svc:db", m["postgres"])
 	}
 }

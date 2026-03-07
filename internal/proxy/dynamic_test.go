@@ -45,13 +45,13 @@ func testDynLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 }
 
-func newTestDynMgr() (*DynamicListenerManager, *fakeTSNet) {
+func newTestDynMgr(svcMap map[string]string) (*DynamicListenerManager, *fakeTSNet) {
 	ts := newFakeTSNet()
 	engine := policy.NewEngine()
 	var resolver *identity.Resolver
 	l4 := NewL4Proxy(testDynLogger())
 	lm := NewListenerManager(engine, resolver, l4, testDynLogger())
-	return NewDynamicListenerManager(ts, lm, nil, "svc:test", testDynLogger()), ts
+	return NewDynamicListenerManager(ts, lm, svcMap, testDynLogger()), ts
 }
 
 func flatListener(name string, port int, forward string) config.FlatListener {
@@ -64,8 +64,17 @@ func flatListener(name string, port int, forward string) config.FlatListener {
 	}
 }
 
+// defaultSvcMap returns a service map that maps each listener name to svc:test.
+func defaultSvcMap(names ...string) map[string]string {
+	m := make(map[string]string, len(names))
+	for _, n := range names {
+		m[n] = "svc:test"
+	}
+	return m
+}
+
 func TestReconcile_AddNewListeners(t *testing.T) {
-	dm, _ := newTestDynMgr()
+	dm, _ := newTestDynMgr(defaultSvcMap("web", "api"))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -88,7 +97,7 @@ func TestReconcile_AddNewListeners(t *testing.T) {
 }
 
 func TestReconcile_RemoveListeners(t *testing.T) {
-	dm, _ := newTestDynMgr()
+	dm, _ := newTestDynMgr(defaultSvcMap("web", "api"))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -121,7 +130,7 @@ func TestReconcile_RemoveListeners(t *testing.T) {
 }
 
 func TestReconcile_ChangeListener(t *testing.T) {
-	dm, _ := newTestDynMgr()
+	dm, _ := newTestDynMgr(defaultSvcMap("web"))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -153,7 +162,7 @@ func TestReconcile_ChangeListener(t *testing.T) {
 }
 
 func TestReconcile_NoopOnUnchanged(t *testing.T) {
-	dm, _ := newTestDynMgr()
+	dm, _ := newTestDynMgr(defaultSvcMap("web"))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -178,7 +187,7 @@ func TestReconcile_NoopOnUnchanged(t *testing.T) {
 }
 
 func TestStopAll(t *testing.T) {
-	dm, _ := newTestDynMgr()
+	dm, _ := newTestDynMgr(defaultSvcMap("web", "api"))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -203,7 +212,7 @@ func TestStopAll(t *testing.T) {
 }
 
 func TestReconcile_EmptyDesired(t *testing.T) {
-	dm, _ := newTestDynMgr()
+	dm, _ := newTestDynMgr(defaultSvcMap("web"))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -228,7 +237,7 @@ func TestReconcile_EmptyDesired(t *testing.T) {
 }
 
 func TestReconcile_SkipsUDPListeners(t *testing.T) {
-	dm, _ := newTestDynMgr()
+	dm, _ := newTestDynMgr(defaultSvcMap("web", "dns"))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -250,5 +259,56 @@ func TestReconcile_SkipsUDPListeners(t *testing.T) {
 	}
 	if udpExists {
 		t.Error("UDP listener should have been skipped")
+	}
+}
+
+func TestReconcile_MultipleServices(t *testing.T) {
+	svcMap := map[string]string{"http": "svc:web", "postgres": "svc:db"}
+	dm, ts := newTestDynMgr(svcMap)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	desired := []config.FlatListener{
+		flatListener("http", 8080, "127.0.0.1:8080"),
+		flatListener("postgres", 5432, "127.0.0.1:5432"),
+	}
+
+	if err := dm.Reconcile(ctx, desired); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	if _, ok := ts.listeners["svc:web:8080"]; !ok {
+		t.Error("expected service listener for svc:web:8080")
+	}
+	if _, ok := ts.listeners["svc:db:5432"]; !ok {
+		t.Error("expected service listener for svc:db:5432")
+	}
+}
+
+func TestReconcile_UnmappedListenerSkipped(t *testing.T) {
+	// Only map "web", not "unmapped"
+	dm, _ := newTestDynMgr(defaultSvcMap("web"))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	desired := []config.FlatListener{
+		flatListener("web", 8080, "127.0.0.1:8080"),
+		flatListener("unmapped", 9090, "127.0.0.1:9090"),
+	}
+
+	if err := dm.Reconcile(ctx, desired); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	dm.mu.Lock()
+	count := len(dm.active)
+	_, unmappedExists := dm.active["unmapped"]
+	dm.mu.Unlock()
+
+	if count != 1 {
+		t.Errorf("active count = %d, want 1", count)
+	}
+	if unmappedExists {
+		t.Error("unmapped listener should have been skipped")
 	}
 }

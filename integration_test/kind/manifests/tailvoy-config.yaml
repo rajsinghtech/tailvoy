@@ -12,6 +12,7 @@ data:
         kind-tcp: [default/eg/tcp]
         kind-grpc: [default/eg/grpc]
         kind-tls: [default/eg/tls]
+        kind-http-alias: [default/eg/http]
       tags:
         - tag:kind
       serviceTags:
@@ -20,6 +21,8 @@ data:
       envoyAdmin: http://127.0.0.1:19000
       envoyAddress: 127.0.0.1
       pollInterval: 5s
+      healthPolicy: any
+      unhealthyThreshold: 2
       proxyProtocol: v2
 ---
 apiVersion: v1

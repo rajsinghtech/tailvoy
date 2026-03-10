@@ -21,10 +21,10 @@ type TSNetServer interface {
 // DynamicListenerManager reconciles tsnet listeners against a desired set
 // of FlatListener entries, starting and stopping listeners as needed.
 type DynamicListenerManager struct {
-	ts                TSNetServer
-	listenerMgr       *ListenerManager
-	listenerToService map[string]string
-	logger            *slog.Logger
+	ts          TSNetServer
+	listenerMgr *ListenerManager
+	svcMatcher  *config.ServiceMatcher
+	logger      *slog.Logger
 
 	mu     sync.Mutex
 	active map[string]*dynamicListener
@@ -35,13 +35,13 @@ type dynamicListener struct {
 	cancel context.CancelFunc
 }
 
-func NewDynamicListenerManager(ts TSNetServer, lm *ListenerManager, listenerToService map[string]string, logger *slog.Logger) *DynamicListenerManager {
+func NewDynamicListenerManager(ts TSNetServer, lm *ListenerManager, svcMatcher *config.ServiceMatcher, logger *slog.Logger) *DynamicListenerManager {
 	return &DynamicListenerManager{
-		ts:                ts,
-		listenerMgr:       lm,
-		listenerToService: listenerToService,
-		logger:            logger,
-		active:            make(map[string]*dynamicListener),
+		ts:          ts,
+		listenerMgr: lm,
+		svcMatcher:  svcMatcher,
+		logger:      logger,
+		active:      make(map[string]*dynamicListener),
 	}
 }
 
@@ -83,12 +83,12 @@ func (dm *DynamicListenerManager) Reconcile(ctx context.Context, desired []confi
 		if _, exists := dm.active[fl.Name]; exists {
 			continue
 		}
-		svcName := dm.listenerToService[fl.Name]
-		if svcName == "" {
+		svcNames := dm.svcMatcher.Match(fl.Name)
+		if len(svcNames) == 0 {
 			dm.logger.Warn("unmapped listener skipped", "name", fl.Name)
 			continue
 		}
-		if err := dm.startListener(ctx, fl, svcName); err != nil {
+		if err := dm.startListener(ctx, fl, svcNames); err != nil {
 			errs = append(errs, fmt.Errorf("start %s: %w", fl.Name, err))
 		}
 	}
@@ -99,23 +99,25 @@ func (dm *DynamicListenerManager) Reconcile(ctx context.Context, desired []confi
 	return nil
 }
 
-func (dm *DynamicListenerManager) startListener(parentCtx context.Context, fl config.FlatListener, svcName string) error {
+func (dm *DynamicListenerManager) startListener(parentCtx context.Context, fl config.FlatListener, svcNames []string) error {
 	lctx, cancel := context.WithCancel(parentCtx)
 
 	port := uint16(fl.Port)
 
-	rawSvcLn, err := dm.ts.ListenTCPService(svcName, port)
-	if err != nil {
-		cancel()
-		return fmt.Errorf("listen service tcp %s: %w", fl.Name, err)
-	}
-	svcLn := &proxyproto.Listener{Listener: rawSvcLn}
-	dm.logger.Info("service listener started", "name", fl.Name, "service", svcName, "port", port)
-	go func() {
-		if err := dm.listenerMgr.Serve(lctx, svcLn, &fl); err != nil {
-			dm.logger.Debug("service listener ended", "name", fl.Name, "err", err)
+	for _, svcName := range svcNames {
+		rawSvcLn, err := dm.ts.ListenTCPService(svcName, port)
+		if err != nil {
+			cancel()
+			return fmt.Errorf("listen service tcp %s (%s): %w", fl.Name, svcName, err)
 		}
-	}()
+		svcLn := &proxyproto.Listener{Listener: rawSvcLn}
+		dm.logger.Info("service listener started", "name", fl.Name, "service", svcName, "port", port)
+		go func() {
+			if err := dm.listenerMgr.Serve(lctx, svcLn, &fl); err != nil {
+				dm.logger.Debug("service listener ended", "name", fl.Name, "err", err)
+			}
+		}()
+	}
 
 	nodeLn, err := dm.ts.Listen("tcp", ":"+strconv.Itoa(fl.Port))
 	if err != nil {

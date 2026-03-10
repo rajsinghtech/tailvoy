@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"regexp"
 	"testing"
 	"time"
 
@@ -46,12 +47,26 @@ func testDynLogger() *slog.Logger {
 }
 
 func newTestDynMgr(svcMap map[string]string) (*DynamicListenerManager, *fakeTSNet) {
+	// Convert map to ServiceMatcher (exact match patterns).
+	mappings := make(map[string][]string)
+	for ln, svc := range svcMap {
+		// Strip "svc:" prefix to get the service name key.
+		name := svc
+		if len(name) > 4 && name[:4] == "svc:" {
+			name = name[4:]
+		}
+		mappings[name] = append(mappings[name], "^"+regexp.QuoteMeta(ln)+"$")
+	}
+	sm, err := config.NewServiceMatcher(mappings)
+	if err != nil {
+		panic(err)
+	}
 	ts := newFakeTSNet()
 	engine := policy.NewEngine()
 	var resolver *identity.Resolver
 	l4 := NewL4Proxy(testDynLogger())
 	lm := NewListenerManager(engine, resolver, l4, testDynLogger())
-	return NewDynamicListenerManager(ts, lm, svcMap, testDynLogger()), ts
+	return NewDynamicListenerManager(ts, lm, sm, testDynLogger()), ts
 }
 
 func flatListener(name string, port int, forward string) config.FlatListener {
@@ -285,6 +300,40 @@ func TestReconcile_MultipleServices(t *testing.T) {
 	}
 }
 
+func TestReconcile_RegexPatternMatching(t *testing.T) {
+	// Use regex pattern that matches discovered listener names.
+	sm, err := config.NewServiceMatcher(map[string][]string{
+		"web": {".*http.*"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := newFakeTSNet()
+	engine := policy.NewEngine()
+	l4 := NewL4Proxy(testDynLogger())
+	lm := NewListenerManager(engine, nil, l4, testDynLogger())
+	dm := NewDynamicListenerManager(ts, lm, sm, testDynLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	desired := []config.FlatListener{
+		flatListener("default/eg/http", 8080, "127.0.0.1:8080"),
+		flatListener("staging/eg/http", 9090, "127.0.0.1:9090"),
+	}
+	if err := dm.Reconcile(ctx, desired); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	dm.mu.Lock()
+	count := len(dm.active)
+	dm.mu.Unlock()
+
+	if count != 2 {
+		t.Errorf("active count = %d, want 2 (regex should match both)", count)
+	}
+}
+
 func TestReconcile_UnmappedListenerSkipped(t *testing.T) {
 	// Only map "web", not "unmapped"
 	dm, _ := newTestDynMgr(defaultSvcMap("web"))
@@ -310,5 +359,38 @@ func TestReconcile_UnmappedListenerSkipped(t *testing.T) {
 	}
 	if unmappedExists {
 		t.Error("unmapped listener should have been skipped")
+	}
+}
+
+func TestReconcile_ListenerMultipleServices(t *testing.T) {
+	// A single listener matches two service patterns → two VIP listeners.
+	sm, err := config.NewServiceMatcher(map[string][]string{
+		"web": {".*http.*"},
+		"api": {".*http.*"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := newFakeTSNet()
+	engine := policy.NewEngine()
+	l4 := NewL4Proxy(testDynLogger())
+	lm := NewListenerManager(engine, nil, l4, testDynLogger())
+	dm := NewDynamicListenerManager(ts, lm, sm, testDynLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	desired := []config.FlatListener{
+		flatListener("default/eg/http", 8080, "127.0.0.1:8080"),
+	}
+	if err := dm.Reconcile(ctx, desired); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	if _, ok := ts.listeners["svc:api:8080"]; !ok {
+		t.Error("expected service listener for svc:api:8080")
+	}
+	if _, ok := ts.listeners["svc:web:8080"]; !ok {
+		t.Error("expected service listener for svc:web:8080")
 	}
 }

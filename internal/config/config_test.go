@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -337,21 +338,21 @@ tailscale:
 		},
 		{
 			name:  "listener not in any mapping",
-			yaml:  baseConfig() + "  serviceMappings:\n    web: [a]\nlisteners:\n  a:\n    port: 80\n    protocol: http\n    routes:\n      - backend: \"localhost:80\"\n  orphan:\n    port: 81\n    protocol: tcp\n    backend: \"localhost:81\"\n",
+			yaml:  baseConfig() + "  serviceMappings:\n    web: [\"^web$\"]\nlisteners:\n  web:\n    port: 80\n    protocol: http\n    routes:\n      - backend: \"localhost:80\"\n  orphan:\n    port: 81\n    protocol: tcp\n    backend: \"localhost:81\"\n",
 			envID: "x", envSec: "x",
 			wantErr: "listener \"orphan\" is not in any service mapping",
 		},
 		{
-			name:  "listener in multiple mappings",
-			yaml:  baseConfig() + "  serviceMappings:\n    web: [a]\n    api: [a]\nlisteners:\n  a:\n    port: 80\n    protocol: http\n    routes:\n      - backend: \"localhost:80\"\n",
+			name:  "invalid regex in serviceMappings",
+			yaml:  baseConfig() + "  serviceMappings:\n    web: [\"[bad\"]\nlisteners:\n  a:\n    port: 80\n    protocol: http\n    routes:\n      - backend: \"localhost:80\"\n",
 			envID: "x", envSec: "x",
-			wantErr: "listener \"a\" appears in multiple service mappings",
+			wantErr: "invalid regex",
 		},
 		{
-			name:  "mapping references nonexistent listener",
+			name:  "mapping pattern doesn't match any listener",
 			yaml:  baseConfig() + "  serviceMappings:\n    web: [ghost]\nlisteners:\n  a:\n    port: 80\n    protocol: http\n    routes:\n      - backend: \"localhost:80\"\n",
 			envID: "x", envSec: "x",
-			wantErr: "service mapping \"web\" references unknown listener \"ghost\"",
+			wantErr: "listener \"a\" is not in any service mapping",
 		},
 	}
 
@@ -465,73 +466,101 @@ listeners:
 	}
 }
 
-func TestServiceForListener(t *testing.T) {
-	setTestEnv(t)
-
-	data := []byte(`
-tailscale:
-  serviceMappings:
-    web: [http, https]
-    db: [postgres]
-  tags: [tag:x]
-  serviceTags: [tag:x]
-listeners:
-  http:
-    port: 80
-    protocol: http
-    routes:
-      - backend: "localhost:8080"
-  https:
-    port: 443
-    protocol: https
-    tls:
-      cert: /c.pem
-      key: /k.pem
-    routes:
-      - backend: "localhost:8080"
-  postgres:
-    port: 5432
-    protocol: tcp
-    backend: "localhost:5432"
-`)
-
-	cfg, err := Parse(data)
+func TestServiceMatcher_ExactNames(t *testing.T) {
+	sm, err := NewServiceMatcher(map[string][]string{
+		"web": {"http", "https"},
+		"db":  {"postgres"},
+	})
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatal(err)
 	}
 
-	m := cfg.Tailscale.ListenerServiceMap()
 	tests := []struct {
 		listener string
-		want     string
+		want     []string
 	}{
-		{"http", "svc:web"},
-		{"https", "svc:web"},
-		{"postgres", "svc:db"},
-		{"nonexistent", ""},
+		{"http", []string{"svc:web"}},
+		{"https", []string{"svc:web"}},
+		{"postgres", []string{"svc:db"}},
+		{"nonexistent", nil},
 	}
 	for _, tt := range tests {
-		if got := m[tt.listener]; got != tt.want {
-			t.Errorf("ListenerServiceMap()[%q] = %q, want %q", tt.listener, got, tt.want)
+		got := sm.Match(tt.listener)
+		if !slices.Equal(got, tt.want) {
+			t.Errorf("Match(%q) = %v, want %v", tt.listener, got, tt.want)
 		}
 	}
 }
 
-func TestListenerServiceMap(t *testing.T) {
-	tc := TailscaleConfig{
-		ServiceMappings: map[string][]string{
-			"web": {"http", "https"},
-			"db":  {"postgres"},
-		},
+func TestServiceMatcher_RegexPatterns(t *testing.T) {
+	sm, err := NewServiceMatcher(map[string][]string{
+		"web": {".*http.*"},
+		"tcp": {".*tcp.*"},
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	m := tc.ListenerServiceMap()
-	if m["http"] != "svc:web" {
-		t.Errorf("http = %q, want svc:web", m["http"])
+
+	tests := []struct {
+		listener string
+		want     []string
+	}{
+		{"default/eg/http", []string{"svc:web"}},
+		{"staging/eg/http", []string{"svc:web"}},
+		{"default/eg/tcp", []string{"svc:tcp"}},
+		{"default/eg/grpc", nil},
 	}
-	if m["https"] != "svc:web" {
-		t.Errorf("https = %q, want svc:web", m["https"])
+	for _, tt := range tests {
+		got := sm.Match(tt.listener)
+		if !slices.Equal(got, tt.want) {
+			t.Errorf("Match(%q) = %v, want %v", tt.listener, got, tt.want)
+		}
 	}
-	if m["postgres"] != "svc:db" {
-		t.Errorf("postgres = %q, want svc:db", m["postgres"])
+}
+
+func TestServiceMatcher_InvalidRegex(t *testing.T) {
+	_, err := NewServiceMatcher(map[string][]string{
+		"web": {"[invalid"},
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid regex")
+	}
+	if !strings.Contains(err.Error(), "invalid regex") {
+		t.Errorf("error = %q, want mention of invalid regex", err.Error())
+	}
+}
+
+func TestServiceMatcher_MatchAll_MultiService(t *testing.T) {
+	// "default/eg/http-tcp" matches both ".*http.*" and ".*tcp.*".
+	// Should return both services.
+	sm, err := NewServiceMatcher(map[string][]string{
+		"web": {".*http.*"},
+		"tcp": {".*tcp.*"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result := sm.MatchAll([]string{"default/eg/http-tcp"})
+	got := result["default/eg/http-tcp"]
+	// Sorted by service name: tcp before web.
+	want := []string{"svc:tcp", "svc:web"}
+	if !slices.Equal(got, want) {
+		t.Errorf("MatchAll multi-service = %v, want %v", got, want)
+	}
+}
+
+func TestServiceMatcher_Unanchored(t *testing.T) {
+	// Patterns are unanchored, so "http" matches "default/eg/http".
+	sm, err := NewServiceMatcher(map[string][]string{
+		"web": {"http"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := sm.Match("default/eg/http")
+	want := []string{"svc:web"}
+	if !slices.Equal(got, want) {
+		t.Errorf("Match(%q) = %v, want %v (unanchored)", "default/eg/http", got, want)
 	}
 }

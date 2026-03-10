@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/rajsinghtech/tailvoy/internal/config"
+	"github.com/rajsinghtech/tailvoy/internal/health"
 )
 
 type configDump struct {
@@ -55,7 +56,82 @@ type filterChain struct {
 }
 
 type filter struct {
+	Name        string          `json:"name"`
+	TypedConfig json.RawMessage `json:"typed_config,omitempty"`
+}
+
+// Route config structs for extracting cluster names from listeners.
+type routesConfigDump struct {
+	Type                string               `json:"@type"`
+	DynamicRouteConfigs []dynamicRouteConfig `json:"dynamic_route_configs"`
+}
+
+type dynamicRouteConfig struct {
+	RouteConfig routeConfigData `json:"route_config"`
+}
+
+type routeConfigData struct {
+	Name         string        `json:"name"`
+	VirtualHosts []virtualHost `json:"virtual_hosts"`
+}
+
+type virtualHost struct {
+	Routes []routeEntry `json:"routes"`
+}
+
+type routeEntry struct {
+	Route *routeAction `json:"route"`
+}
+
+type routeAction struct {
+	Cluster          string            `json:"cluster"`
+	WeightedClusters *weightedClusters `json:"weighted_clusters"`
+}
+
+type weightedClusters struct {
+	Clusters []weightedCluster `json:"clusters"`
+}
+
+type weightedCluster struct {
 	Name string `json:"name"`
+}
+
+type httpConnMgrTypedConfig struct {
+	RouteConfig *routeConfigData `json:"route_config"`
+	Rds         *rdsReference    `json:"rds"`
+}
+
+type rdsReference struct {
+	RouteConfigName string `json:"route_config_name"`
+}
+
+type tcpProxyTypedConfig struct {
+	Cluster string `json:"cluster"`
+}
+
+// Cluster health structs for /clusters?format=json endpoint.
+type clustersResponse struct {
+	ClusterStatuses []clusterStatus `json:"cluster_statuses"`
+}
+
+type clusterStatus struct {
+	Name         string       `json:"name"`
+	HostStatuses []hostStatus `json:"host_statuses"`
+}
+
+type hostStatus struct {
+	HealthStatus hostHealthStatus `json:"health_status"`
+}
+
+type hostHealthStatus struct {
+	EdsHealthStatus string `json:"eds_health_status"`
+}
+
+// DiscoveryResult bundles listener discovery with cluster health data.
+type DiscoveryResult struct {
+	Listeners        []config.FlatListener
+	ListenerClusters map[string][]string
+	ClusterHealth    map[string]health.ClusterHealth
 }
 
 type Discoverer struct {
@@ -87,35 +163,56 @@ func New(cfg *config.DiscoveryConfig, logger *slog.Logger) (*Discoverer, error) 
 	return d, nil
 }
 
-func (d *Discoverer) Discover(ctx context.Context) ([]config.FlatListener, error) {
-	url := d.adminURL + "/config_dump"
+// fetchAdminEndpoint fetches a raw body from the given Envoy admin path.
+func (d *Discoverer) fetchAdminEndpoint(ctx context.Context, path string) ([]byte, error) {
+	url := d.adminURL + path
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
+		return nil, fmt.Errorf("create request for %s: %w", path, err)
 	}
-
 	resp, err := d.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("fetch config dump: %w", err)
+		return nil, fmt.Errorf("fetch %s: %w", path, err)
 	}
 	defer resp.Body.Close()
-
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("config dump returned status %d", resp.StatusCode)
+		return nil, fmt.Errorf("%s returned status %d", path, resp.StatusCode)
 	}
-
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("read response body: %w", err)
+		return nil, fmt.Errorf("read %s body: %w", path, err)
 	}
-
-	return d.parse(body)
+	return body, nil
 }
 
-func (d *Discoverer) parse(body []byte) ([]config.FlatListener, error) {
+func (d *Discoverer) Discover(ctx context.Context) ([]config.FlatListener, error) {
+	body, err := d.fetchAdminEndpoint(ctx, "/config_dump")
+	if err != nil {
+		return nil, err
+	}
+	listeners, _, err := d.parseConfigDump(body)
+	return listeners, err
+}
+
+// parseConfigDump parses a raw config_dump body into listeners, listener→cluster mappings, and RDS route configs.
+func (d *Discoverer) parseConfigDump(body []byte) ([]config.FlatListener, map[string][]string, error) {
 	var dump configDump
 	if err := json.Unmarshal(body, &dump); err != nil {
-		return nil, fmt.Errorf("parse config dump: %w", err)
+		return nil, nil, fmt.Errorf("parse config dump: %w", err)
+	}
+
+	// Collect RDS route configs for resolving route_config_name references.
+	rdsConfigs := make(map[string]*routeConfigData)
+	for _, raw := range dump.Configs {
+		var rcd routesConfigDump
+		if err := json.Unmarshal(raw, &rcd); err == nil && strings.Contains(rcd.Type, "RoutesConfigDump") {
+			for i := range rcd.DynamicRouteConfigs {
+				rc := &rcd.DynamicRouteConfigs[i].RouteConfig
+				if rc.Name != "" {
+					rdsConfigs[rc.Name] = rc
+				}
+			}
+		}
 	}
 
 	var dynamicListeners []dynamicListener
@@ -131,6 +228,7 @@ func (d *Discoverer) parse(body []byte) ([]config.FlatListener, error) {
 		}
 	}
 
+	listenerClusters := make(map[string][]string)
 	var listeners []config.FlatListener
 	for _, dl := range dynamicListeners {
 		if dl.ActiveState == nil {
@@ -164,6 +262,12 @@ func (d *Discoverer) parse(body []byte) ([]config.FlatListener, error) {
 		}
 		isL7 := d.hasHTTPConnectionManager(allChains)
 
+		// Extract cluster names from filter chains.
+		clusters := d.extractClusters(allChains, rdsConfigs)
+		if len(clusters) > 0 {
+			listenerClusters[name] = clusters
+		}
+
 		fl := config.FlatListener{
 			Name:      name,
 			Port:      port,
@@ -190,7 +294,103 @@ func (d *Discoverer) parse(body []byte) ([]config.FlatListener, error) {
 	sort.Slice(listeners, func(i, j int) bool {
 		return listeners[i].Name < listeners[j].Name
 	})
-	return listeners, nil
+	return listeners, listenerClusters, nil
+}
+
+// extractClusters extracts cluster names from filter chains by inspecting typed_config.
+func (d *Discoverer) extractClusters(chains []filterChain, rdsConfigs map[string]*routeConfigData) []string {
+	seen := make(map[string]bool)
+	for _, fc := range chains {
+		for _, f := range fc.Filters {
+			if len(f.TypedConfig) == 0 {
+				continue
+			}
+
+			if strings.Contains(f.Name, "http_connection_manager") {
+				var hcm httpConnMgrTypedConfig
+				if err := json.Unmarshal(f.TypedConfig, &hcm); err != nil {
+					continue
+				}
+				// Inline route_config.
+				if hcm.RouteConfig != nil {
+					d.collectClustersFromRouteConfig(hcm.RouteConfig, seen)
+				}
+				// RDS reference.
+				if hcm.Rds != nil && hcm.Rds.RouteConfigName != "" {
+					if rc, ok := rdsConfigs[hcm.Rds.RouteConfigName]; ok {
+						d.collectClustersFromRouteConfig(rc, seen)
+					}
+				}
+			} else if strings.Contains(f.Name, "tcp_proxy") {
+				var tcp tcpProxyTypedConfig
+				if err := json.Unmarshal(f.TypedConfig, &tcp); err != nil {
+					continue
+				}
+				if tcp.Cluster != "" {
+					seen[tcp.Cluster] = true
+				}
+			}
+		}
+	}
+
+	clusters := make([]string, 0, len(seen))
+	for c := range seen {
+		clusters = append(clusters, c)
+	}
+	sort.Strings(clusters)
+	return clusters
+}
+
+func (d *Discoverer) collectClustersFromRouteConfig(rc *routeConfigData, seen map[string]bool) {
+	for _, vh := range rc.VirtualHosts {
+		for _, re := range vh.Routes {
+			if re.Route == nil {
+				continue
+			}
+			if re.Route.Cluster != "" {
+				seen[re.Route.Cluster] = true
+			}
+			if re.Route.WeightedClusters != nil {
+				for _, wc := range re.Route.WeightedClusters.Clusters {
+					if wc.Name != "" {
+						seen[wc.Name] = true
+					}
+				}
+			}
+		}
+	}
+}
+
+// FetchClusterHealth fetches health status from Envoy /clusters?format=json endpoint.
+func (d *Discoverer) FetchClusterHealth(ctx context.Context) (map[string]health.ClusterHealth, error) {
+	body, err := d.fetchAdminEndpoint(ctx, "/clusters?format=json")
+	if err != nil {
+		return nil, err
+	}
+	return parseClusterHealth(body)
+}
+
+func parseClusterHealth(body []byte) (map[string]health.ClusterHealth, error) {
+	var cr clustersResponse
+	if err := json.Unmarshal(body, &cr); err != nil {
+		return nil, fmt.Errorf("parse cluster health: %w", err)
+	}
+
+	result := make(map[string]health.ClusterHealth, len(cr.ClusterStatuses))
+	for _, cs := range cr.ClusterStatuses {
+		ch := health.ClusterHealth{
+			Name:       cs.Name,
+			TotalHosts: len(cs.HostStatuses),
+		}
+		for _, hs := range cs.HostStatuses {
+			status := hs.HealthStatus.EdsHealthStatus
+			if status == "HEALTHY" || status == "DEGRADED" {
+				ch.HealthyHosts++
+			}
+		}
+		result[cs.Name] = ch
+	}
+	return result, nil
 }
 
 func (d *Discoverer) hasHTTPConnectionManager(chains []filterChain) bool {
@@ -204,23 +404,40 @@ func (d *Discoverer) hasHTTPConnectionManager(chains []filterChain) bool {
 	return false
 }
 
-func (d *Discoverer) Watch(ctx context.Context) <-chan []config.FlatListener {
-	ch := make(chan []config.FlatListener, 1)
+func (d *Discoverer) Watch(ctx context.Context) <-chan DiscoveryResult {
+	ch := make(chan DiscoveryResult, 1)
 	go func() {
 		defer close(ch)
 
-		var prev []config.FlatListener
+		var prevListeners []config.FlatListener
+		var prevHealth map[string]health.ClusterHealth
+		var prevListenerClusters map[string][]string
 
-		if listeners, err := d.Discover(ctx); err != nil {
-			d.logger.Error("initial discovery failed", "err", err)
-		} else {
-			prev = listeners
-			select {
-			case ch <- listeners:
-			case <-ctx.Done():
+		send := func() {
+			result, err := d.discoverFull(ctx)
+			if err != nil {
+				d.logger.Error("discovery failed", "err", err)
 				return
 			}
+			listenersChanged := !flatListenersEqual(prevListeners, result.Listeners)
+			healthChanged := !clusterHealthEqual(prevHealth, result.ClusterHealth)
+			clustersChanged := !listenerClustersEqual(prevListenerClusters, result.ListenerClusters)
+			if prevListeners == nil || listenersChanged || healthChanged || clustersChanged {
+				if listenersChanged {
+					d.logger.Info("discovered listener change",
+						"prev", len(prevListeners), "new", len(result.Listeners))
+				}
+				prevListeners = result.Listeners
+				prevHealth = result.ClusterHealth
+				prevListenerClusters = result.ListenerClusters
+				select {
+				case ch <- result:
+				case <-ctx.Done():
+				}
+			}
 		}
+
+		send()
 
 		ticker := time.NewTicker(d.pollInterval)
 		defer ticker.Stop()
@@ -230,26 +447,89 @@ func (d *Discoverer) Watch(ctx context.Context) <-chan []config.FlatListener {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				listeners, err := d.Discover(ctx)
-				if err != nil {
-					d.logger.Error("discovery poll failed", "err", err)
-					continue
-				}
-				d.logger.Debug("discovery poll completed", "count", len(listeners))
-				if !flatListenersEqual(prev, listeners) {
-					d.logger.Info("discovered listener change",
-						"prev", len(prev), "new", len(listeners))
-					prev = listeners
-					select {
-					case ch <- listeners:
-					case <-ctx.Done():
-						return
-					}
-				}
+				send()
 			}
 		}
 	}()
 	return ch
+}
+
+// discoverFull fetches config_dump and cluster health concurrently.
+func (d *Discoverer) discoverFull(ctx context.Context) (DiscoveryResult, error) {
+	type configResult struct {
+		body []byte
+		err  error
+	}
+	type healthResult struct {
+		health map[string]health.ClusterHealth
+		err    error
+	}
+
+	configCh := make(chan configResult, 1)
+	healthCh := make(chan healthResult, 1)
+
+	go func() {
+		body, err := d.fetchAdminEndpoint(ctx, "/config_dump")
+		configCh <- configResult{body, err}
+	}()
+	go func() {
+		h, err := d.FetchClusterHealth(ctx)
+		healthCh <- healthResult{h, err}
+	}()
+
+	cr := <-configCh
+	if cr.err != nil {
+		return DiscoveryResult{}, cr.err
+	}
+
+	listeners, listenerClusters, err := d.parseConfigDump(cr.body)
+	if err != nil {
+		return DiscoveryResult{}, err
+	}
+
+	hr := <-healthCh
+	clusterHealth := hr.health
+	if hr.err != nil {
+		d.logger.Warn("failed to fetch cluster health, treating as unknown", "err", hr.err)
+		clusterHealth = make(map[string]health.ClusterHealth)
+	}
+
+	return DiscoveryResult{
+		Listeners:        listeners,
+		ListenerClusters: listenerClusters,
+		ClusterHealth:    clusterHealth,
+	}, nil
+}
+
+func clusterHealthEqual(a, b map[string]health.ClusterHealth) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, av := range a {
+		bv, ok := b[k]
+		if !ok || av.TotalHosts != bv.TotalHosts || av.HealthyHosts != bv.HealthyHosts {
+			return false
+		}
+	}
+	return true
+}
+
+func listenerClustersEqual(a, b map[string][]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, av := range a {
+		bv, ok := b[k]
+		if !ok || len(av) != len(bv) {
+			return false
+		}
+		for i := range av {
+			if av[i] != bv[i] {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func flatListenersEqual(a, b []config.FlatListener) bool {

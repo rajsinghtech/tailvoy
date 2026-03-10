@@ -5,6 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
+	"sync"
+
+	"tailscale.com/client/local"
+	"tailscale.com/ipn"
 
 	tailscale "tailscale.com/client/tailscale/v2"
 )
@@ -48,4 +53,80 @@ func (mm *MultiManager) EnsureAll(ctx context.Context, mappings map[string][]int
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// AdvertisementManager toggles VIP service advertisement via local client prefs.
+type AdvertisementManager struct {
+	lc     *local.Client
+	logger *slog.Logger
+	mu     sync.Mutex
+}
+
+func NewAdvertisementManager(lc *local.Client, logger *slog.Logger) *AdvertisementManager {
+	return &AdvertisementManager{
+		lc:     lc,
+		logger: logger,
+	}
+}
+
+// updateAdvertiseServices fetches current prefs, applies fn to transform the
+// AdvertiseServices list, and writes the result back.
+func (am *AdvertisementManager) updateAdvertiseServices(ctx context.Context, fn func([]string) []string) error {
+	am.mu.Lock()
+	defer am.mu.Unlock()
+
+	prefs, err := am.lc.GetPrefs(ctx)
+	if err != nil {
+		return fmt.Errorf("get prefs: %w", err)
+	}
+
+	updated := fn(prefs.AdvertiseServices)
+	if slices.Equal(prefs.AdvertiseServices, updated) {
+		return nil
+	}
+
+	_, err = am.lc.EditPrefs(ctx, &ipn.MaskedPrefs{
+		AdvertiseServicesSet: true,
+		Prefs: ipn.Prefs{
+			AdvertiseServices: updated,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("edit prefs: %w", err)
+	}
+	return nil
+}
+
+// Unadvertise removes the given services from AdvertiseServices prefs.
+func (am *AdvertisementManager) Unadvertise(ctx context.Context, services []string) error {
+	return am.updateAdvertiseServices(ctx, func(current []string) []string {
+		remove := make(map[string]bool, len(services))
+		for _, s := range services {
+			remove[s] = true
+		}
+		var filtered []string
+		for _, s := range current {
+			if !remove[s] {
+				filtered = append(filtered, s)
+			}
+		}
+		return filtered
+	})
+}
+
+// Readvertise adds the given services back to AdvertiseServices prefs.
+func (am *AdvertisementManager) Readvertise(ctx context.Context, services []string) error {
+	return am.updateAdvertiseServices(ctx, func(current []string) []string {
+		existing := make(map[string]bool, len(current))
+		for _, s := range current {
+			existing[s] = true
+		}
+		updated := current
+		for _, s := range services {
+			if !existing[s] {
+				updated = append(updated, s)
+			}
+		}
+		return updated
+	})
 }

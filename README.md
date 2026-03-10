@@ -246,8 +246,8 @@ Instead of static listeners, tailvoy can poll Envoy's admin API to auto-discover
 ```yaml
 tailscale:
   serviceMappings:
-    http: ["default/eg/http"]
-    tcp: ["default/eg/tcp"]
+    http: [".*http.*"]          # regex: matches any listener containing "http"
+    tcp: ["default/eg/tcp"]     # exact names are valid regex too
   tags: ["tag:my-gw"]
   serviceTags: ["tag:my-gw"]
 
@@ -257,9 +257,32 @@ discovery:
   pollInterval: "5s"
   proxyProtocol: v2
   listenerFilter: "default/eg/.*"      # optional: regex to include only matching names
+  healthPolicy: "any"                   # optional: "any" (default) or "all"
+  unhealthyThreshold: 3                 # optional: consecutive unhealthy polls before unadvertise (default: 3)
 ```
 
-In discovery mode, `serviceMappings` maps Envoy Gateway listener names (format: `<namespace>/<gateway>/<listener>`) to VIP service names. Discovered listeners not in any mapping are skipped with a warning.
+#### Health-based VIP advertisement
+
+In discovery mode, tailvoy monitors Envoy cluster health via the `/clusters` admin endpoint. When backends go down, VIP services are automatically unadvertised to prevent traffic from being routed into a black hole.
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `healthPolicy` | `any` | `any`: unadvertise if ANY cluster has 0 healthy hosts. `all`: unadvertise only if ALL clusters have 0 healthy hosts. |
+| `unhealthyThreshold` | `3` | Number of consecutive unhealthy polls before unadvertising a service. Recovery (readvertise) is immediate. |
+
+Health checks run at the same interval as discovery polling (`pollInterval`). tsnet listeners stay alive during unadvertisement — only the VIP service advertisement is toggled via `EditPrefs`.
+
+In discovery mode, `serviceMappings` values are regex patterns matched against discovered listener names. Patterns are unanchored (like `listenerFilter`), so `http` matches `default/eg/http`. Exact names remain valid since they're valid regex. Use `^...$` anchors for exact match when needed.
+
+```yaml
+serviceMappings:
+  web: [".*http.*"]              # wildcard: any listener containing "http"
+  tcp: ["default/eg/tcp"]        # exact name (valid regex, matches itself)
+  all: [".*"]                    # catch-all: every discovered listener
+  ns: ["^staging/.*"]            # namespace prefix: all staging listeners
+```
+
+Discovered listeners not matching any pattern are skipped with a warning. If a listener matches multiple service patterns, it advertises on all matching services simultaneously — e.g., a listener on port 8080 could be reachable via both `svc:web` and `svc:api`.
 
 Discovered listener names follow Envoy Gateway convention: `<namespace>/<gateway>/<listener>`. Use these names in ACL grants and SecurityPolicy `contextExtensions`:
 

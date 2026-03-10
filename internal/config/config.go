@@ -38,11 +38,13 @@ type Config struct {
 }
 
 type DiscoveryConfig struct {
-	EnvoyAdmin     string `yaml:"envoyAdmin"`
-	EnvoyAddress   string `yaml:"envoyAddress"`
-	PollInterval   string `yaml:"pollInterval"`
-	ListenerFilter string `yaml:"listenerFilter"`
-	ProxyProtocol  string `yaml:"proxyProtocol"`
+	EnvoyAdmin         string `yaml:"envoyAdmin"`
+	EnvoyAddress       string `yaml:"envoyAddress"`
+	PollInterval       string `yaml:"pollInterval"`
+	ListenerFilter     string `yaml:"listenerFilter"`
+	ProxyProtocol      string `yaml:"proxyProtocol"`
+	HealthPolicy       string `yaml:"healthPolicy"`       // "any" (default) or "all"
+	UnhealthyThreshold int    `yaml:"unhealthyThreshold"` // consecutive unhealthy polls before unadvertise, default 3
 }
 
 func (d *DiscoveryConfig) ParsedPollInterval() time.Duration {
@@ -54,6 +56,20 @@ func (d *DiscoveryConfig) ParsedPollInterval() time.Duration {
 		return 10 * time.Second
 	}
 	return dur
+}
+
+func (d *DiscoveryConfig) ParsedHealthPolicy() string {
+	if d.HealthPolicy == "" {
+		return "any"
+	}
+	return d.HealthPolicy
+}
+
+func (d *DiscoveryConfig) ParsedUnhealthyThreshold() int {
+	if d.UnhealthyThreshold <= 0 {
+		return 3
+	}
+	return d.UnhealthyThreshold
 }
 
 type TailscaleConfig struct {
@@ -388,6 +404,11 @@ func (d *DiscoveryConfig) validate() error {
 		if _, err := regexp.Compile(d.ListenerFilter); err != nil {
 			return fmt.Errorf("discovery.listenerFilter is invalid regex: %w", err)
 		}
+	}
+	switch d.HealthPolicy {
+	case "", "any", "all":
+	default:
+		return fmt.Errorf("discovery.healthPolicy must be empty, \"any\", or \"all\", got %q", d.HealthPolicy)
 	}
 	return nil
 }

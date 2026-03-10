@@ -255,7 +255,20 @@ discovery:
   pollInterval: "5s"
   proxyProtocol: v2
   listenerFilter: "default/eg/.*"      # optional: regex to include only matching names
+  healthPolicy: "any"                   # optional: "any" (default) or "all"
+  unhealthyThreshold: 3                 # optional: consecutive unhealthy polls before unadvertise (default: 3)
 ```
+
+#### Health-based VIP advertisement
+
+In discovery mode, tailvoy monitors Envoy cluster health via the `/clusters` admin endpoint. When backends go down, VIP services are automatically unadvertised to prevent traffic from being routed into a black hole.
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `healthPolicy` | `any` | `any`: unadvertise if ANY cluster has 0 healthy hosts. `all`: unadvertise only if ALL clusters have 0 healthy hosts. |
+| `unhealthyThreshold` | `3` | Number of consecutive unhealthy polls before unadvertising a service. Recovery (readvertise) is immediate. |
+
+Health checks run at the same interval as discovery polling (`pollInterval`). tsnet listeners stay alive during unadvertisement — only the VIP service advertisement is toggled via `EditPrefs`.
 
 In discovery mode, `serviceMappings` maps Envoy Gateway listener names (format: `<namespace>/<gateway>/<listener>`) to VIP service names. Discovered listeners not in any mapping are skipped with a warning.
 

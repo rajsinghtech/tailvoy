@@ -17,6 +17,7 @@ import (
 	"github.com/rajsinghtech/tailvoy/internal/config"
 	"github.com/rajsinghtech/tailvoy/internal/discovery"
 	"github.com/rajsinghtech/tailvoy/internal/envoy"
+	"github.com/rajsinghtech/tailvoy/internal/health"
 	"github.com/rajsinghtech/tailvoy/internal/identity"
 	"github.com/rajsinghtech/tailvoy/internal/policy"
 	"github.com/rajsinghtech/tailvoy/internal/proxy"
@@ -143,15 +144,18 @@ func run(args []string) error {
 
 		svcMgr := service.NewMultiManager(tsClient, cfg.Tailscale.ServiceTags, logger)
 		dynMgr := proxy.NewDynamicListenerManager(&tsnetAdapter{ts}, listenerMgr, listenerToService, logger)
+		advMgr := service.NewAdvertisementManager(lc, logger)
+		healthPolicy := health.Policy(cfg.Discovery.ParsedHealthPolicy())
+		tracker := health.NewTracker(cfg.Discovery.ParsedUnhealthyThreshold())
 
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			defer dynMgr.StopAll()
-			for listeners := range disc.Watch(ctx) {
+			for result := range disc.Watch(ctx) {
 				// Ensure VIP services for discovered listeners.
 				portsByService := make(map[string][]int)
-				for _, fl := range listeners {
+				for _, fl := range result.Listeners {
 					if fl.Transport == config.ProtocolUDP {
 						continue
 					}
@@ -164,7 +168,25 @@ func run(args []string) error {
 				if err := svcMgr.EnsureAll(ctx, portsByService); err != nil {
 					logger.Error("ensure VIP services error", "err", err)
 				}
-				if err := dynMgr.Reconcile(ctx, listeners); err != nil {
+
+				// Evaluate health and toggle advertisement.
+				svcHealth := health.Evaluate(listenerToService, result.ListenerClusters, result.ClusterHealth, healthPolicy)
+				toAdvertise, toUnadvertise := tracker.Update(svcHealth)
+
+				if len(toUnadvertise) > 0 {
+					logger.Warn("unadvertising unhealthy services", "services", toUnadvertise)
+					if err := advMgr.Unadvertise(ctx, toUnadvertise); err != nil {
+						logger.Error("unadvertise error", "err", err)
+					}
+				}
+				if len(toAdvertise) > 0 {
+					logger.Info("readvertising recovered services", "services", toAdvertise)
+					if err := advMgr.Readvertise(ctx, toAdvertise); err != nil {
+						logger.Error("readvertise error", "err", err)
+					}
+				}
+
+				if err := dynMgr.Reconcile(ctx, result.Listeners); err != nil {
 					logger.Error("reconcile error", "err", err)
 				}
 			}

@@ -4,10 +4,12 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/rajsinghtech/tailvoy/internal/health"
 	"gopkg.in/yaml.v3"
 )
 
@@ -38,11 +40,13 @@ type Config struct {
 }
 
 type DiscoveryConfig struct {
-	EnvoyAdmin     string `yaml:"envoyAdmin"`
-	EnvoyAddress   string `yaml:"envoyAddress"`
-	PollInterval   string `yaml:"pollInterval"`
-	ListenerFilter string `yaml:"listenerFilter"`
-	ProxyProtocol  string `yaml:"proxyProtocol"`
+	EnvoyAdmin         string `yaml:"envoyAdmin"`
+	EnvoyAddress       string `yaml:"envoyAddress"`
+	PollInterval       string `yaml:"pollInterval"`
+	ListenerFilter     string `yaml:"listenerFilter"`
+	ProxyProtocol      string `yaml:"proxyProtocol"`
+	HealthPolicy       string `yaml:"healthPolicy"`       // "any" (default) or "all"
+	UnhealthyThreshold int    `yaml:"unhealthyThreshold"` // consecutive unhealthy polls before unadvertise, default 3
 }
 
 func (d *DiscoveryConfig) ParsedPollInterval() time.Duration {
@@ -54,6 +58,20 @@ func (d *DiscoveryConfig) ParsedPollInterval() time.Duration {
 		return 10 * time.Second
 	}
 	return dur
+}
+
+func (d *DiscoveryConfig) ParsedHealthPolicy() health.Policy {
+	if d.HealthPolicy == "" || d.HealthPolicy == string(health.PolicyAny) {
+		return health.PolicyAny
+	}
+	return health.Policy(d.HealthPolicy)
+}
+
+func (d *DiscoveryConfig) ParsedUnhealthyThreshold() int {
+	if d.UnhealthyThreshold <= 0 {
+		return health.DefaultUnhealthyThreshold
+	}
+	return d.UnhealthyThreshold
 }
 
 type TailscaleConfig struct {
@@ -73,12 +91,65 @@ func (t *TailscaleConfig) Hostname() string {
 	return "tailvoy-proxy"
 }
 
-// ListenerServiceMap returns a map from listener name to full service name (e.g. "svc:web").
-func (t *TailscaleConfig) ListenerServiceMap() map[string]string {
-	out := make(map[string]string)
-	for svcName, listeners := range t.ServiceMappings {
-		for _, ln := range listeners {
-			out[ln] = ServicePrefix + svcName
+// ServiceMatcher matches listener names against regex patterns from serviceMappings.
+type ServiceMatcher struct {
+	patterns []servicePattern
+}
+
+type servicePattern struct {
+	service string
+	re      *regexp.Regexp
+}
+
+// NewServiceMatcher compiles all serviceMappings patterns into a matcher.
+// Patterns are unanchored regex (consistent with listenerFilter).
+// Sorted by service name for deterministic first-match ordering.
+func NewServiceMatcher(mappings map[string][]string) (*ServiceMatcher, error) {
+	var patterns []servicePattern
+	svcNames := make([]string, 0, len(mappings))
+	for name := range mappings {
+		svcNames = append(svcNames, name)
+	}
+	sort.Strings(svcNames)
+
+	for _, svcName := range svcNames {
+		for _, pat := range mappings[svcName] {
+			re, err := regexp.Compile(pat)
+			if err != nil {
+				return nil, fmt.Errorf("service %q: invalid regex %q: %w", svcName, pat, err)
+			}
+			patterns = append(patterns, servicePattern{
+				service: ServicePrefix + svcName,
+				re:      re,
+			})
+		}
+	}
+	return &ServiceMatcher{patterns: patterns}, nil
+}
+
+// Match returns all service names (e.g. "svc:web") whose patterns match the
+// listener name. Returns nil if no pattern matches.
+func (sm *ServiceMatcher) Match(listenerName string) []string {
+	var out []string
+	for _, p := range sm.patterns {
+		if !p.re.MatchString(listenerName) {
+			continue
+		}
+		if !slices.Contains(out, p.service) {
+			out = append(out, p.service)
+		}
+	}
+	return out
+}
+
+// MatchAll builds a listener→services map for the given listener names.
+// A listener matching multiple service patterns will map to all of them.
+func (sm *ServiceMatcher) MatchAll(listenerNames []string) map[string][]string {
+	out := make(map[string][]string, len(listenerNames))
+	for _, name := range listenerNames {
+		svcs := sm.Match(name)
+		if len(svcs) > 0 {
+			out[name] = svcs
 		}
 	}
 	return out
@@ -166,7 +237,7 @@ func (c *Config) validate() error {
 		return fmt.Errorf("discovery and listeners are mutually exclusive")
 	}
 	if c.Discovery != nil {
-		return c.Discovery.validate()
+		return c.Discovery.validate(ts.ServiceMappings)
 	}
 
 	if len(c.Listeners) == 0 {
@@ -195,20 +266,20 @@ func (c *Config) validate() error {
 }
 
 func (c *Config) validateServiceMappings() error {
-	seen := make(map[string]string)
-	for svcName, listeners := range c.Tailscale.ServiceMappings {
-		for _, ln := range listeners {
-			if _, ok := c.Listeners[ln]; !ok {
-				return fmt.Errorf("service mapping %q references unknown listener %q", svcName, ln)
-			}
-			if prev, dup := seen[ln]; dup {
-				return fmt.Errorf("listener %q appears in multiple service mappings: %q and %q", ln, prev, svcName)
-			}
-			seen[ln] = svcName
-		}
+	sm, err := NewServiceMatcher(c.Tailscale.ServiceMappings)
+	if err != nil {
+		return fmt.Errorf("serviceMappings: %w", err)
 	}
+
+	listenerNames := make([]string, 0, len(c.Listeners))
 	for name := range c.Listeners {
-		if _, ok := seen[name]; !ok {
+		listenerNames = append(listenerNames, name)
+	}
+	sort.Strings(listenerNames)
+
+	for _, name := range listenerNames {
+		svcs := sm.Match(name)
+		if len(svcs) == 0 {
 			return fmt.Errorf("listener %q is not in any service mapping", name)
 		}
 	}
@@ -367,7 +438,7 @@ func validateRoute(prefix string, idx int, r Route) error {
 	return nil
 }
 
-func (d *DiscoveryConfig) validate() error {
+func (d *DiscoveryConfig) validate(mappings map[string][]string) error {
 	if d.EnvoyAdmin == "" {
 		return fmt.Errorf("discovery.envoyAdmin is required")
 	}
@@ -388,6 +459,15 @@ func (d *DiscoveryConfig) validate() error {
 		if _, err := regexp.Compile(d.ListenerFilter); err != nil {
 			return fmt.Errorf("discovery.listenerFilter is invalid regex: %w", err)
 		}
+	}
+	switch d.HealthPolicy {
+	case "", string(health.PolicyAny), string(health.PolicyAll):
+	default:
+		return fmt.Errorf("discovery.healthPolicy must be empty, %q, or %q, got %q", health.PolicyAny, health.PolicyAll, d.HealthPolicy)
+	}
+	// Validate serviceMappings patterns compile as regex.
+	if _, err := NewServiceMatcher(mappings); err != nil {
+		return fmt.Errorf("serviceMappings: %w", err)
 	}
 	return nil
 }

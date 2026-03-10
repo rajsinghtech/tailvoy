@@ -236,4 +236,14 @@ else
 fi
 
 # =====================================================
+section "MULTI-SERVICE ALIAS"
+# =====================================================
+
+SVC_HTTP_ALIAS="docker-http-alias.$DNS_SUFFIX"
+wait_dns "$SVC_HTTP_ALIAS" 60
+
+assert_http "Alias: /public/hello allow" "http://$SVC_HTTP_ALIAS:80/public/hello" "200"
+assert_http "Alias: /admin deny" "http://$SVC_HTTP_ALIAS:80/admin" "403"
+
+# =====================================================
 print_results

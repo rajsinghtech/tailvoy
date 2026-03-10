@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"slices"
 	"strconv"
 	"sync"
 	"syscall"
@@ -17,6 +18,7 @@ import (
 	"github.com/rajsinghtech/tailvoy/internal/config"
 	"github.com/rajsinghtech/tailvoy/internal/discovery"
 	"github.com/rajsinghtech/tailvoy/internal/envoy"
+	"github.com/rajsinghtech/tailvoy/internal/health"
 	"github.com/rajsinghtech/tailvoy/internal/identity"
 	"github.com/rajsinghtech/tailvoy/internal/policy"
 	"github.com/rajsinghtech/tailvoy/internal/proxy"
@@ -131,7 +133,10 @@ func run(args []string) error {
 		tsIP = ip4.String()
 	}
 
-	listenerToService := cfg.Tailscale.ListenerServiceMap()
+	svcMatcher, err := config.NewServiceMatcher(cfg.Tailscale.ServiceMappings)
+	if err != nil {
+		return fmt.Errorf("service matcher: %w", err)
+	}
 
 	if cfg.Discovery != nil {
 		disc, err := discovery.New(cfg.Discovery, logger)
@@ -142,29 +147,59 @@ func run(args []string) error {
 		}
 
 		svcMgr := service.NewMultiManager(tsClient, cfg.Tailscale.ServiceTags, logger)
-		dynMgr := proxy.NewDynamicListenerManager(&tsnetAdapter{ts}, listenerMgr, listenerToService, logger)
+		dynMgr := proxy.NewDynamicListenerManager(&tsnetAdapter{ts}, listenerMgr, svcMatcher, logger)
+		advMgr := service.NewAdvertisementManager(lc, logger)
+		healthPolicy := cfg.Discovery.ParsedHealthPolicy()
+		tracker := health.NewTracker(cfg.Discovery.ParsedUnhealthyThreshold())
 
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			defer dynMgr.StopAll()
-			for listeners := range disc.Watch(ctx) {
-				// Ensure VIP services for discovered listeners.
-				portsByService := make(map[string][]int)
-				for _, fl := range listeners {
-					if fl.Transport == config.ProtocolUDP {
-						continue
-					}
-					svc := listenerToService[fl.Name]
-					if svc == "" {
-						continue // unmapped listeners are warned about in Reconcile
-					}
-					portsByService[svc] = append(portsByService[svc], fl.Port)
+			var prevNames []string
+			var listenerToService map[string][]string
+			for result := range disc.Watch(ctx) {
+				// Rebuild listener→service map only when listener names change.
+				names := make([]string, 0, len(result.Listeners))
+				for _, fl := range result.Listeners {
+					names = append(names, fl.Name)
 				}
-				if err := svcMgr.EnsureAll(ctx, portsByService); err != nil {
-					logger.Error("ensure VIP services error", "err", err)
+				if !slices.Equal(prevNames, names) {
+					prevNames = names
+					listenerToService = svcMatcher.MatchAll(names)
+
+					portsByService := make(map[string][]int)
+					for _, fl := range result.Listeners {
+						if fl.Transport == config.ProtocolUDP {
+							continue
+						}
+						for _, svc := range listenerToService[fl.Name] {
+							portsByService[svc] = append(portsByService[svc], fl.Port)
+						}
+					}
+					if err := svcMgr.EnsureAll(ctx, portsByService); err != nil {
+						logger.Error("ensure VIP services error", "err", err)
+					}
 				}
-				if err := dynMgr.Reconcile(ctx, listeners); err != nil {
+
+				// Evaluate health and toggle advertisement.
+				svcHealth := health.Evaluate(listenerToService, result.ListenerClusters, result.ClusterHealth, healthPolicy)
+				toAdvertise, toUnadvertise := tracker.Update(svcHealth)
+
+				if len(toUnadvertise) > 0 {
+					logger.Warn("unadvertising unhealthy services", "services", toUnadvertise)
+					if err := advMgr.Unadvertise(ctx, toUnadvertise); err != nil {
+						logger.Error("unadvertise error", "err", err)
+					}
+				}
+				if len(toAdvertise) > 0 {
+					logger.Info("readvertising recovered services", "services", toAdvertise)
+					if err := advMgr.Readvertise(ctx, toAdvertise); err != nil {
+						logger.Error("readvertise error", "err", err)
+					}
+				}
+
+				if err := dynMgr.Reconcile(ctx, result.Listeners); err != nil {
 					logger.Error("reconcile error", "err", err)
 				}
 			}
@@ -211,13 +246,20 @@ func run(args []string) error {
 		envoyArgs = append([]string{"-c", tmpFile.Name()}, envoyArgs...)
 		logger.Info("generated standalone envoy config", "path", tmpFile.Name())
 
+		// Build listener→service map from known flat listener names.
+		flatNames := make([]string, 0, len(flat))
+		for name := range flat {
+			flatNames = append(flatNames, name)
+		}
+		listenerToService := svcMatcher.MatchAll(flatNames)
+
 		// Build per-service port mappings and separate UDP listeners.
 		portsByService := make(map[string][]int)
 		var udpFLs []config.FlatListener
 		type tcpEntry struct {
-			name    string
-			fl      config.FlatListener
-			svcName string
+			name     string
+			fl       config.FlatListener
+			svcNames []string
 		}
 		var tcpEntries []tcpEntry
 
@@ -227,9 +269,11 @@ func run(args []string) error {
 				udpFLs = append(udpFLs, fl)
 				continue
 			}
-			svc := listenerToService[name]
-			portsByService[svc] = append(portsByService[svc], fl.Port)
-			tcpEntries = append(tcpEntries, tcpEntry{name: name, fl: fl, svcName: svc})
+			svcs := listenerToService[name]
+			for _, svc := range svcs {
+				portsByService[svc] = append(portsByService[svc], fl.Port)
+			}
+			tcpEntries = append(tcpEntries, tcpEntry{name: name, fl: fl, svcNames: svcs})
 		}
 
 		// Ensure all VIP services.
@@ -243,28 +287,29 @@ func run(args []string) error {
 		// Start TCP listeners with per-service VIPs.
 		for _, entry := range tcpEntries {
 			fl := entry.fl
-			svcName := entry.svcName
 			port := uint16(fl.Port)
 
-			rawSvcLn, err := ts.ListenService(svcName, tsnet.ServiceModeTCP{
-				Port:                 port,
-				PROXYProtocolVersion: 2,
-			})
-			if err != nil {
-				cancel()
-				wg.Wait()
-				return fmt.Errorf("listen service %s (port %d): %w", fl.Name, port, err)
-			}
-			svcLn := &proxyproto.Listener{Listener: rawSvcLn}
-			logger.Info("service listener started", "name", fl.Name, "service", svcName, "port", port)
-
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				if err := listenerMgr.Serve(ctx, svcLn, &fl); err != nil {
-					logger.Error("service listener error", "name", fl.Name, "err", err)
+			for _, svcName := range entry.svcNames {
+				rawSvcLn, err := ts.ListenService(svcName, tsnet.ServiceModeTCP{
+					Port:                 port,
+					PROXYProtocolVersion: 2,
+				})
+				if err != nil {
+					cancel()
+					wg.Wait()
+					return fmt.Errorf("listen service %s/%s (port %d): %w", fl.Name, svcName, port, err)
 				}
-			}()
+				svcLn := &proxyproto.Listener{Listener: rawSvcLn}
+				logger.Info("service listener started", "name", fl.Name, "service", svcName, "port", port)
+
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					if err := listenerMgr.Serve(ctx, svcLn, &fl); err != nil {
+						logger.Error("service listener error", "name", fl.Name, "err", err)
+					}
+				}()
+			}
 
 			portStr := strconv.Itoa(fl.Port)
 			nodeLn, err := ts.Listen("tcp", ":"+portStr)

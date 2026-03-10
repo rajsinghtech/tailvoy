@@ -235,6 +235,17 @@ assert_http "Hostname: /admin/x Host:public.tailvoy.test deny" "http://$IP:8080/
 assert_http "Hostname: /public/hello Host:admin.tailvoy.test allow" "http://$IP:8080/public/hello" "200" -H "Host: admin.tailvoy.test"
 
 # =====================================================
+section "MULTI-SERVICE ALIAS"
+# =====================================================
+
+SVC_HTTP_ALIAS="kind-http-alias.$DNS_SUFFIX"
+wait_dns "$SVC_HTTP_ALIAS" 60
+
+assert_http "Alias: /public/hello allow" "http://$SVC_HTTP_ALIAS:8080/public/hello" "200"
+assert_http "Alias: /health allow" "http://$SVC_HTTP_ALIAS:8080/health" "200"
+assert_http "Alias: /admin deny" "http://$SVC_HTTP_ALIAS:8080/admin/settings" "403"
+
+# =====================================================
 section "TCPRoute"
 # =====================================================
 
@@ -314,6 +325,52 @@ if [ "$HAS_GRPCURL" = "true" ]; then
     fi
 else
     echo "  SKIP: grpcurl not found"
+fi
+
+# =====================================================
+section "HEALTH-BASED UNADVERTISE"
+# =====================================================
+
+# Baseline: health should pass
+assert_http "Health: baseline /health allow" "http://$IP:8080/health" "200"
+
+# Scale backend to 0 to trigger unhealthy state
+echo "  Scaling backend to 0 replicas..."
+kubectl scale deployment/backend --replicas=0
+kubectl wait deployment/backend --for=jsonpath='{.status.readyReplicas}'=0 --timeout=30s 2>/dev/null || sleep 5
+
+# Wait for 2 unhealthy polls (5s interval × 2 threshold) + buffer
+echo "  Waiting 15s for unadvertise..."
+sleep 15
+
+# VIP should be unadvertised — curl should fail or timeout
+UNADV_CODE=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 5 "http://$IP:8080/health" 2>&1 || true)
+if [ "$UNADV_CODE" = "200" ]; then
+    test_fail "Health: VIP unadvertised after backend down" "still returning 200"
+else
+    test_pass "Health: VIP unadvertised after backend down (got $UNADV_CODE)"
+fi
+
+# Restore backend
+echo "  Scaling backend back to 1 replica..."
+kubectl scale deployment/backend --replicas=1
+kubectl wait deployment/backend --for=condition=available --timeout=60s
+
+# Wait for readvertise
+echo "  Waiting 10s for readvertise..."
+sleep 10
+
+# VIP should be back
+READV_OK=false
+for i in $(seq 1 12); do
+    READV_CODE=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 5 "http://$IP:8080/health" 2>&1 || true)
+    if [ "$READV_CODE" = "200" ]; then READV_OK=true; break; fi
+    sleep 5
+done
+if [ "$READV_OK" = "true" ]; then
+    test_pass "Health: VIP readvertised after backend restored"
+else
+    test_fail "Health: VIP readvertised after backend restored" "got $READV_CODE"
 fi
 
 # =====================================================

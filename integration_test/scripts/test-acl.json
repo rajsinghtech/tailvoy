@@ -15,10 +15,12 @@
       "svc:docker-tcp": ["tag:docker"],
       "svc:docker-udp": ["tag:docker"],
       "svc:docker-restricted": ["tag:docker"],
+      "svc:docker-http-alias": ["tag:docker"],
       "svc:kind-http": ["tag:kind"],
       "svc:kind-tcp": ["tag:kind"],
       "svc:kind-grpc": ["tag:kind"],
-      "svc:kind-tls": ["tag:kind"]
+      "svc:kind-tls": ["tag:kind"],
+      "svc:kind-http-alias": ["tag:kind"]
     }
   },
   "grants": [

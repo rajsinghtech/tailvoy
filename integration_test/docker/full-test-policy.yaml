@@ -2,6 +2,7 @@ tailscale:
   hostname: tailvoy-docker-test-tailvoy
   serviceMappings:
     docker-http: [http]
+    docker-http-alias: [http]
     docker-grpc: [grpc]
     docker-tls: [tls]
     docker-tcp: [tcp]

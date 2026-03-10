@@ -52,6 +52,8 @@ tailvoy connects to the tailnet, creates VIP services per service mapping, gener
 
 ## How it works
 
+> For a deep dive into the internal call flow — from ACL grants through the packet filter to ext_authz enforcement — see [docs/architecture.md](docs/architecture.md).
+
 tailvoy embeds [tsnet](https://pkg.go.dev/tailscale.com/tsnet) to join the tailnet as an ephemeral OAuth node. It uses [Tailscale Services](https://tailscale.com/docs/features/tailscale-services) (`tsnet.ListenService`) with per-service VIPs so each service mapping gets its own stable address and multiple replicas can serve it. Every connection triggers a WhoIs lookup to resolve the caller's identity and peer capabilities.
 
 Authorization uses the `rajsingh.info/cap/tailvoy` capability with three dimensions:

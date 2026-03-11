@@ -1,6 +1,6 @@
 module github.com/rajsinghtech/tailvoy
 
-go 1.25.6
+go 1.26.1
 
 require (
 	github.com/envoyproxy/go-control-plane/envoy v1.37.0
@@ -9,12 +9,12 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20251222181119-0a764e51fe1b
 	google.golang.org/grpc v1.79.2
 	gopkg.in/yaml.v3 v3.0.1
-	tailscale.com v1.94.2
+	tailscale.com v1.96.1
 	tailscale.com/client/tailscale/v2 v2.8.1-0.20260305000327-8b59c2c04425
 )
 
 require (
-	filippo.io/edwards25519 v1.1.0 // indirect
+	filippo.io/edwards25519 v1.2.0 // indirect
 	github.com/akutz/memconn v0.1.0 // indirect
 	github.com/alexbrainman/sspi v0.0.0-20231016080023-1a75b4708caa // indirect
 	github.com/aws/aws-sdk-go-v2 v1.41.0 // indirect
@@ -36,7 +36,7 @@ require (
 	github.com/dblohm7/wingoes v0.0.0-20240119213807-a09d6be7affa // indirect
 	github.com/envoyproxy/protoc-gen-validate v1.3.0 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
-	github.com/gaissmai/bart v0.18.0 // indirect
+	github.com/gaissmai/bart v0.26.1 // indirect
 	github.com/go-json-experiment/json v0.0.0-20250813024750-ebf49471dced // indirect
 	github.com/godbus/dbus/v5 v5.1.1-0.20230522191255-76236955d466 // indirect
 	github.com/golang/groupcache v0.0.0-20241129210726-2c02b8208cf8 // indirect
@@ -73,5 +73,5 @@ require (
 	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 // indirect
 	golang.zx2c4.com/wireguard/windows v0.5.3 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
-	gvisor.dev/gvisor v0.0.0-20250205023644-9414b50a5633 // indirect
+	gvisor.dev/gvisor v0.0.0-20260224225140-573d5e7127a8 // indirect
 )

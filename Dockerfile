@@ -16,7 +16,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -ldflags "-s -w" -o /tailvoy ./cmd/tailvoy/
 
-FROM envoyproxy/envoy:distroless-v1.37.0
+FROM envoyproxy/envoy:distroless-v1.37.1
 
 ARG VERSION=dev
 ARG COMMIT=unknown

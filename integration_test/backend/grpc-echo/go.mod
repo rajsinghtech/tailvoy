@@ -2,7 +2,7 @@ module grpc-echo
 
 go 1.25.6
 
-require google.golang.org/grpc v1.79.1
+require google.golang.org/grpc v1.79.3
 
 require (
 	golang.org/x/net v0.48.0 // indirect

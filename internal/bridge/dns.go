@@ -93,18 +93,25 @@ func (d *DNSServer) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 
 // ListenAndServeUDP starts the DNS server on a UDP PacketConn.
 func (d *DNSServer) ListenAndServeUDP(pc net.PacketConn) error {
-	d.udpServer = &dns.Server{PacketConn: pc, Handler: d}
-	return d.udpServer.ActivateAndServe()
+	srv := &dns.Server{PacketConn: pc, Handler: d}
+	d.mu.Lock()
+	d.udpServer = srv
+	d.mu.Unlock()
+	return srv.ActivateAndServe()
 }
 
 // Shutdown gracefully stops the server.
 func (d *DNSServer) Shutdown() error {
+	d.mu.RLock()
+	udp := d.udpServer
+	tcp := d.tcpServer
+	d.mu.RUnlock()
 	var errs []error
-	if d.udpServer != nil {
-		errs = append(errs, d.udpServer.Shutdown())
+	if udp != nil {
+		errs = append(errs, udp.Shutdown())
 	}
-	if d.tcpServer != nil {
-		errs = append(errs, d.tcpServer.Shutdown())
+	if tcp != nil {
+		errs = append(errs, tcp.Shutdown())
 	}
 	return errors.Join(errs...)
 }

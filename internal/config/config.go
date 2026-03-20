@@ -37,6 +37,7 @@ type Config struct {
 	Tailscale TailscaleConfig     `yaml:"tailscale"`
 	Listeners map[string]Listener `yaml:"listeners"`
 	Discovery *DiscoveryConfig    `yaml:"discovery,omitempty"`
+	Bridge    *BridgeConfig       `yaml:"bridge,omitempty"`
 }
 
 type DiscoveryConfig struct {
@@ -203,8 +204,10 @@ func Parse(data []byte) (*Config, error) {
 		return nil, fmt.Errorf("parsing yaml: %w", err)
 	}
 
-	cfg.Tailscale.ClientID = os.Getenv("TS_CLIENT_ID")
-	cfg.Tailscale.ClientSecret = os.Getenv("TS_CLIENT_SECRET")
+	if cfg.Bridge == nil {
+		cfg.Tailscale.ClientID = os.Getenv("TS_CLIENT_ID")
+		cfg.Tailscale.ClientSecret = os.Getenv("TS_CLIENT_SECRET")
+	}
 
 	if err := cfg.validate(); err != nil {
 		return nil, err
@@ -213,6 +216,13 @@ func Parse(data []byte) (*Config, error) {
 }
 
 func (c *Config) validate() error {
+	if c.Bridge != nil {
+		if len(c.Listeners) > 0 || c.Discovery != nil {
+			return fmt.Errorf("bridge mode is mutually exclusive with listeners and discovery")
+		}
+		return c.Bridge.validate()
+	}
+
 	ts := &c.Tailscale
 	if ts.Service != "" {
 		return fmt.Errorf("tailscale.service has been replaced by tailscale.serviceMappings")

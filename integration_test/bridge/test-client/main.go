@@ -28,7 +28,7 @@ func main() {
 	defer cancel()
 
 	dir := filepath.Join(os.TempDir(), "bridge-test-client")
-	os.MkdirAll(dir, 0o700)
+	_ = os.MkdirAll(dir, 0o700)
 
 	srv := &tsnet.Server{
 		Dir:           dir,
@@ -37,7 +37,7 @@ func main() {
 		Ephemeral:     true,
 		AdvertiseTags: []string{"tag:user"},
 	}
-	defer srv.Close()
+	defer func() { _ = srv.Close() }()
 
 	log.Println("connecting to tailnet2...")
 	if _, err := srv.Up(ctx); err != nil {

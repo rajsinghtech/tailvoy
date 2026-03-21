@@ -27,6 +27,13 @@ func NewDNSServer(zone string, logger *slog.Logger) *DNSServer {
 	}
 }
 
+// SetZone updates the authoritative zone. Safe to call after construction.
+func (d *DNSServer) SetZone(zone string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.zone = dns.Fqdn(zone)
+}
+
 // SetRecords replaces all records atomically.
 func (d *DNSServer) SetRecords(records map[string][]net.IP) {
 	d.mu.Lock()

@@ -281,7 +281,16 @@ func (bm *BridgeManager) runDirection(ctx context.Context, ds *directionState, c
 				bm.logger.Error("forwarder reconcile failed", "direction", ds.from+">"+ds.to, "err", err)
 			}
 
-			if ds.dnsServer != nil && vipAddrs != nil {
+			if ds.dnsServer != nil && vipAddrs != nil && len(devices) > 0 {
+				// Set the zone from discovered FQDNs if not yet set.
+				fqdnsForZone := make([]string, 0, len(devices))
+				for _, dev := range devices {
+					fqdnsForZone = append(fqdnsForZone, dev.FQDN)
+				}
+				if zone := ExtractZone(fqdnsForZone); zone != "" {
+					ds.dnsServer.SetZone(zone)
+				}
+
 				records := make(map[string][]net.IP)
 				for _, dev := range devices {
 					svcName := ServiceName(dev.FQDN, ds.dir.Prefix)

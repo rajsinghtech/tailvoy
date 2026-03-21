@@ -137,6 +137,24 @@ func (bm *BridgeManager) Run(ctx context.Context) error {
 		}
 	}
 
+	// Log peer status for each tsnet server.
+	for name, srv := range servers {
+		lc, err := srv.LocalClient()
+		if err != nil {
+			bm.logger.Warn("could not get local client for status", "tailnet", name, "err", err)
+			continue
+		}
+		st, err := lc.Status(ctx)
+		if err != nil {
+			bm.logger.Warn("status failed", "tailnet", name, "err", err)
+			continue
+		}
+		bm.logger.Info("tsnet status", "tailnet", name, "self", st.Self.HostName, "ips", st.Self.TailscaleIPs, "peers", len(st.Peer))
+		for _, peer := range st.Peer {
+			bm.logger.Info("tsnet peer", "tailnet", name, "peer", peer.HostName, "ips", peer.TailscaleIPs, "online", peer.Online, "relay", peer.Relay, "curAddr", peer.CurAddr)
+		}
+	}
+
 	// Group rules by direction key.
 	dirRules := make(map[string][]config.BridgeRule)
 	for _, rule := range bm.cfg.Rules {

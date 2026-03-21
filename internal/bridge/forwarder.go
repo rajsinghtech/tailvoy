@@ -83,10 +83,12 @@ func (f *Forwarder) Reconcile(ctx context.Context, devices map[string]DeviceInfo
 			}
 
 			svcName := ServiceName(dev.FQDN, f.prefix)
+			f.logger.Info("starting VIP listener", "svc", svcName, "port", port, "dial_target", addr)
 			ln, err := f.destListener.ListenService(svcName, uint16(port))
 			if err != nil {
 				return fmt.Errorf("listen service %s:%d: %w", svcName, port, err)
 			}
+			f.logger.Info("VIP listener started", "svc", svcName, "port", port)
 
 			lctx, cancel := context.WithCancel(ctx)
 
@@ -112,14 +114,18 @@ func (f *Forwarder) acceptLoop(lctx context.Context, ln net.Listener, addr strin
 		}
 		go func() {
 			defer conn.Close()
+			f.logger.Info("accepted connection", "from", conn.RemoteAddr(), "target", addr, "port", port)
 			dialCtx, dialCancel := context.WithTimeout(lctx, f.dialTimeout)
 			defer dialCancel()
-			backend, err := f.srcDialer.Dial(dialCtx, "tcp", fmt.Sprintf("%s:%d", addr, port))
+			dialAddr := fmt.Sprintf("%s:%d", addr, port)
+			f.logger.Info("dialing source", "addr", dialAddr)
+			backend, err := f.srcDialer.Dial(dialCtx, "tcp", dialAddr)
 			if err != nil {
 				f.logger.Error("bridge dial failed", "target", addr, "port", port, "err", err)
 				return
 			}
 			defer backend.Close()
+			f.logger.Info("bridge connection established", "target", dialAddr)
 			biCopy(lctx, conn, backend)
 		}()
 	}

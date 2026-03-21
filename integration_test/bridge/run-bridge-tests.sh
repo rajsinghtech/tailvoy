@@ -57,8 +57,8 @@ go build -o "$BRIDGE_BIN" ./cmd/tailvoy/
 echo "Built: $BRIDGE_BIN"
 
 # --- Start a simple HTTP backend (the CI runner is the discoverable node on tailnet1) ---
-section "Starting HTTP backend on port 8080"
-python3 -m http.server 8080 &>/dev/null &
+section "Starting HTTP backend on port 80"
+python3 -m http.server 80 &>/dev/null &
 BACKEND_PID=$!
 echo "Backend PID: $BACKEND_PID"
 

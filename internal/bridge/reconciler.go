@@ -163,6 +163,10 @@ func (r *Reconciler) CleanupOrphans(ctx context.Context, desired map[string]Devi
 		if _, ok := desiredNames[svc.Name]; ok {
 			continue
 		}
+		// Don't clean up DNS VIP services — they're managed separately.
+		if strings.Contains(svc.Name, "-bridge-dns") {
+			continue
+		}
 		r.log().Info("cleaning up orphaned VIP service", "svc", svc.Name)
 		if delErr := r.client.Delete(ctx, svc.Name); delErr != nil {
 			errs = append(errs, fmt.Errorf("delete orphan %s: %w", svc.Name, delErr))

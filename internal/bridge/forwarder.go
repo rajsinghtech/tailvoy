@@ -8,6 +8,8 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	proxyproto "github.com/pires/go-proxyproto"
 )
 
 // Dialer abstracts srcServer.Dial for testing.
@@ -84,10 +86,11 @@ func (f *Forwarder) Reconcile(ctx context.Context, devices map[string]DeviceInfo
 
 			svcName := ServiceName(dev.FQDN, f.prefix)
 			f.logger.Info("starting VIP listener", "svc", svcName, "port", port, "dial_target", addr)
-			ln, err := f.destListener.ListenService(svcName, uint16(port))
+			rawLn, err := f.destListener.ListenService(svcName, uint16(port))
 			if err != nil {
 				return fmt.Errorf("listen service %s:%d: %w", svcName, port, err)
 			}
+			ln := &proxyproto.Listener{Listener: rawLn}
 			f.logger.Info("VIP listener started", "svc", svcName, "port", port)
 
 			lctx, cancel := context.WithCancel(ctx)
@@ -104,6 +107,7 @@ func (f *Forwarder) Reconcile(ctx context.Context, devices map[string]DeviceInfo
 
 func (f *Forwarder) acceptLoop(lctx context.Context, ln net.Listener, addr string, port int) {
 	defer func() { _ = ln.Close() }()
+	f.logger.Info("accept loop started", "addr", ln.Addr(), "target", addr, "port", port)
 	for {
 		conn, err := ln.Accept()
 		if err != nil {

@@ -36,7 +36,10 @@ type tsnetServiceListener struct {
 }
 
 func (t *tsnetServiceListener) ListenService(name string, port uint16) (net.Listener, error) {
-	return t.srv.ListenService(name, tsnet.ServiceModeTCP{Port: port})
+	return t.srv.ListenService(name, tsnet.ServiceModeTCP{
+		Port:                 port,
+		PROXYProtocolVersion: 2,
+	})
 }
 
 // tsnetDialer wraps tsnet.Server to implement Dialer.

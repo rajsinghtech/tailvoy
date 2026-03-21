@@ -237,14 +237,6 @@ func (bm *BridgeManager) Run(ctx context.Context) error {
 }
 
 func (bm *BridgeManager) runDirection(ctx context.Context, ds *directionState, clients map[string]*tailscale.Client) {
-	// Initial orphan cleanup.
-	devices, _, _, _ := ds.discoverer.Poll(ctx)
-	if devices != nil {
-		if err := ds.reconciler.CleanupOrphans(ctx, devices); err != nil {
-			bm.logger.Error("orphan cleanup failed", "direction", ds.from+">"+ds.to, "err", err)
-		}
-	}
-
 	ticker := time.NewTicker(bm.cfg.ParsedPollInterval())
 	defer ticker.Stop()
 

@@ -175,6 +175,19 @@ func (bm *BridgeManager) Run(ctx context.Context) error {
 		if dir.DNS != nil && dir.DNS.Enabled {
 			ds.dnsServer = NewDNSServer("", bm.logger)
 
+			// Create the DNS VIP service on the destination tailnet.
+			dnsSvcName := DNSServiceName(from, to)
+			dnsSvc := tailscale.VIPService{
+				Name:    dnsSvcName,
+				Tags:    dir.ServiceTags,
+				Ports:   []string{"tcp:53", "udp:53"},
+				Comment: "Managed by tailvoy bridge",
+			}
+			bm.logger.Info("creating DNS VIP service", "name", dnsSvcName)
+			if err := clients[to].VIPServices().CreateOrUpdate(ctx, dnsSvc); err != nil {
+				bm.logger.Error("failed to create DNS VIP service", "name", dnsSvcName, "err", err)
+			}
+
 			if dir.DNS.SplitDns {
 				ds.splitDNS = NewSplitDNSConfigurator(
 					&tsDNSClient{r: clients[to].DNS()},
@@ -268,7 +281,11 @@ func (bm *BridgeManager) runDirection(ctx context.Context, ds *directionState, c
 				if zone != "" {
 					dnsSvcName := DNSServiceName(ds.from, ds.to)
 					dnsSvc, err := clients[ds.to].VIPServices().Get(ctx, dnsSvcName)
-					if err == nil && len(dnsSvc.Addrs) > 0 {
+					if err != nil {
+						bm.logger.Warn("DNS VIP not ready", "svc", dnsSvcName, "err", err)
+					} else if len(dnsSvc.Addrs) == 0 {
+						bm.logger.Warn("DNS VIP has no addresses yet", "svc", dnsSvcName)
+					} else {
 						if cfgErr := ds.splitDNS.Configure(ctx, zone, dnsSvc.Addrs[0]); cfgErr != nil {
 							bm.logger.Error("split-dns configure failed", "direction", ds.from+">"+ds.to, "err", cfgErr)
 						}

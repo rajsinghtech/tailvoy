@@ -91,6 +91,15 @@ func (d *DNSServer) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	_ = w.WriteMsg(msg)
 }
 
+// ListenAndServeTCP starts the DNS server on a TCP listener.
+func (d *DNSServer) ListenAndServeTCP(ln net.Listener) error {
+	srv := &dns.Server{Listener: ln, Handler: d}
+	d.mu.Lock()
+	d.tcpServer = srv
+	d.mu.Unlock()
+	return srv.ActivateAndServe()
+}
+
 // ListenAndServeUDP starts the DNS server on a UDP PacketConn.
 func (d *DNSServer) ListenAndServeUDP(pc net.PacketConn) error {
 	srv := &dns.Server{PacketConn: pc, Handler: d}

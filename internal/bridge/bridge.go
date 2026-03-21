@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	proxyproto "github.com/pires/go-proxyproto"
 	"github.com/rajsinghtech/tailvoy/internal/config"
 	tailscale "tailscale.com/client/tailscale/v2"
 	"tailscale.com/tsnet"
@@ -201,12 +202,28 @@ func (bm *BridgeManager) Run(ctx context.Context) error {
 			dnsSvc := tailscale.VIPService{
 				Name:    dnsSvcName,
 				Tags:    dir.ServiceTags,
-				Ports:   []string{"tcp:53", "udp:53"},
+				Ports:   []string{"tcp:53"},
 				Comment: "Managed by tailvoy bridge",
 			}
 			bm.logger.Info("creating DNS VIP service", "name", dnsSvcName)
 			if err := clients[to].VIPServices().CreateOrUpdate(ctx, dnsSvc); err != nil {
 				bm.logger.Error("failed to create DNS VIP service", "name", dnsSvcName, "err", err)
+			}
+
+			// Start DNS server on the VIP service listener (TCP port 53).
+			dnsLn, err := dstSrv.ListenService(dnsSvcName, tsnet.ServiceModeTCP{
+				Port:                 53,
+				PROXYProtocolVersion: 2,
+			})
+			if err != nil {
+				bm.logger.Error("failed to listen DNS VIP service", "name", dnsSvcName, "err", err)
+			} else {
+				bm.logger.Info("DNS server listening", "name", dnsSvcName)
+				go func() {
+					if srvErr := ds.dnsServer.ListenAndServeTCP(&proxyproto.Listener{Listener: dnsLn}); srvErr != nil {
+						bm.logger.Error("DNS server error", "err", srvErr)
+					}
+				}()
 			}
 
 			if dir.DNS.SplitDns {

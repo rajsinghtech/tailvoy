@@ -6,7 +6,7 @@
     },
     "autoApprovers": {
         "services": {
-            "svc:*": ["tag:bridge"]
+            "tag:bridge-svc": ["tag:bridge"]
         }
     },
     "grants": [

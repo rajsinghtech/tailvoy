@@ -57,8 +57,8 @@ go build -o "$BRIDGE_BIN" ./cmd/tailvoy/
 echo "Built: $BRIDGE_BIN"
 
 # --- Start a simple HTTP backend (the CI runner is the discoverable node on tailnet1) ---
-section "Starting HTTP backend on port 80"
-python3 -m http.server 80 &>/dev/null &
+section "Starting HTTP backend on port 8080"
+python3 -m http.server 8080 &>/dev/null &
 BACKEND_PID=$!
 echo "Backend PID: $BACKEND_PID"
 
@@ -214,7 +214,7 @@ else
 
     echo "Running connection test (VIP: $BRIDGE_VIP_ADDR:80)..."
     BRIDGE_VIP_ADDR="$BRIDGE_VIP_ADDR" \
-    BRIDGE_VIP_PORT="80" \
+    BRIDGE_VIP_PORT="8080" \
     TAILNET2_TS_CLIENT_ID="$TAILNET2_TS_CLIENT_ID" \
     TAILNET2_TS_CLIENT_SECRET="$TAILNET2_TS_CLIENT_SECRET" \
     timeout 120 /tmp/bridge-test-client-$$ 2>&1 | tee -a "$SCRIPT_DIR/bridge-test-client.log"

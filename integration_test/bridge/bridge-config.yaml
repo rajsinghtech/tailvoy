@@ -28,13 +28,13 @@ bridge:
       to: tailnet2
       discover:
         tags: ["tag:user"]
-        ports: [80]
+        ports: [8080]
 
     - from: tailnet2
       to: tailnet1
       discover:
         tags: ["tag:user"]
-        ports: [80]
+        ports: [8080]
 
   pollInterval: 10s
   dialTimeout: 10s

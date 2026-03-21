@@ -73,7 +73,7 @@ echo "Bridge PID: $BRIDGE_PID (logs: $SCRIPT_DIR/bridge.log)"
 section "Waiting for bridge to initialize (60s)"
 READY=false
 for i in $(seq 1 60); do
-    if grep -q "bridge initialized\|starting bridge\|poll complete" "$SCRIPT_DIR/bridge.log" 2>/dev/null; then
+    if grep -q "bridge initialized\|poll complete" "$SCRIPT_DIR/bridge.log" 2>/dev/null; then
         READY=true
         echo "Bridge ready (attempt $i)"
         break
@@ -130,9 +130,12 @@ fi
 
 # --- Verify: VIP services created on tailnet2 ---
 section "Verifying VIP services on tailnet2"
-VIP_LIST=$(curl -sf -H "Authorization: Bearer $TAILNET2_TOKEN" \
-    "https://api.tailscale.com/api/v2/tailnet/-/vip-services" || echo "[]")
+VIP_RAW=$(curl -sf -H "Authorization: Bearer $TAILNET2_TOKEN" \
+    "https://api.tailscale.com/api/v2/tailnet/-/vip-services" || echo "{}")
+# API returns {"vipServices": [...]} or bare array; normalize to array
+VIP_LIST=$(echo "$VIP_RAW" | jq 'if type == "array" then . elif .vipServices then .vipServices else [] end' 2>/dev/null || echo "[]")
 echo "VIP services on tailnet2: $(echo "$VIP_LIST" | jq 'length')"
+echo "Raw VIP response: $(echo "$VIP_RAW" | jq -c '.' 2>/dev/null || echo "$VIP_RAW")"
 
 BRIDGE_SVCS=$(echo "$VIP_LIST" | jq '[.[] | select(.comment == "Managed by tailvoy bridge")]' 2>/dev/null || echo "[]")
 BRIDGE_SVC_COUNT=$(echo "$BRIDGE_SVCS" | jq 'length')

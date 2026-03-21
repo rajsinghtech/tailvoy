@@ -187,6 +187,8 @@ func (bm *BridgeManager) Run(ctx context.Context) error {
 		directions = append(directions, ds)
 	}
 
+	bm.logger.Info("bridge initialized", "directions", len(directions))
+
 	var wg sync.WaitGroup
 	for _, ds := range directions {
 		ds := ds
@@ -219,13 +221,12 @@ func (bm *BridgeManager) runDirection(ctx context.Context, ds *directionState, c
 			goto wait
 		}
 
-		if len(added) > 0 || len(removed) > 0 {
-			bm.logger.Info("devices changed",
-				"direction", ds.from+">"+ds.to,
-				"added", len(added),
-				"removed", len(removed),
-			)
-		}
+		bm.logger.Info("poll complete",
+			"direction", ds.from+">"+ds.to,
+			"devices", len(devices),
+			"added", len(added),
+			"removed", len(removed),
+		)
 
 		{
 			vipAddrs, err := ds.reconciler.Reconcile(ctx, devices)

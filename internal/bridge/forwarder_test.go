@@ -131,11 +131,6 @@ func TestBiCopy(t *testing.T) {
 func TestForwarder_Lifecycle(t *testing.T) {
 	echoAddr := startEchoServer(t)
 
-	// echoDialer dials the fixed echo address regardless of requested addr.
-	type echoDialer struct{ addr string }
-	dial := &struct{ addr string }{addr: echoAddr}
-	_ = dial
-
 	// Use a directDialer pointing at our echo server by overriding addr in DeviceInfo.
 	host, port, err := net.SplitHostPort(echoAddr)
 	if err != nil {

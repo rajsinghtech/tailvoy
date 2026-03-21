@@ -118,11 +118,11 @@ func (bm *BridgeManager) Run(ctx context.Context) error {
 		bm.logger.Info("connecting to tailnet", "name", name, "hostname", srv.Hostname)
 		if _, err := srv.Up(ctx); err != nil {
 			for _, s := range servers {
-				s.Close()
+				_ = s.Close()
 			}
 			return fmt.Errorf("tsnet %s: %w", name, err)
 		}
-		defer srv.Close()
+		defer func() { _ = srv.Close() }()
 		servers[name] = srv
 
 		clients[name] = &tailscale.Client{

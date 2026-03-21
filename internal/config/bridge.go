@@ -9,11 +9,11 @@ import (
 var tailnetNameRe = regexp.MustCompile(`^[a-z0-9-]+$`)
 
 type BridgeConfig struct {
-	Tailnets     map[string]BridgeTailnet  `yaml:"tailnets"`
+	Tailnets     map[string]BridgeTailnet   `yaml:"tailnets"`
 	Directions   map[string]BridgeDirection `yaml:"directions"`
-	Rules        []BridgeRule              `yaml:"rules"`
-	PollInterval string                    `yaml:"pollInterval,omitempty"`
-	DialTimeout  string                    `yaml:"dialTimeout,omitempty"`
+	Rules        []BridgeRule               `yaml:"rules"`
+	PollInterval string                     `yaml:"pollInterval,omitempty"`
+	DialTimeout  string                     `yaml:"dialTimeout,omitempty"`
 }
 
 type BridgeTailnet struct {

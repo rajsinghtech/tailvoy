@@ -101,7 +101,7 @@ func (f *Forwarder) Reconcile(ctx context.Context, devices map[string]DeviceInfo
 }
 
 func (f *Forwarder) acceptLoop(lctx context.Context, ln net.Listener, addr string, port int) {
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	for {
 		conn, err := ln.Accept()
 		if err != nil {

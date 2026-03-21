@@ -59,7 +59,7 @@ func (d *DNSServer) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 
 		if !dns.IsSubDomain(d.zone, name) {
 			msg.SetRcode(r, dns.RcodeRefused)
-			w.WriteMsg(msg)
+			_ = w.WriteMsg(msg)
 			return
 		}
 
@@ -69,7 +69,7 @@ func (d *DNSServer) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 
 		if !ok {
 			msg.SetRcode(r, dns.RcodeNameError) // NXDOMAIN
-			w.WriteMsg(msg)
+			_ = w.WriteMsg(msg)
 			return
 		}
 
@@ -88,7 +88,7 @@ func (d *DNSServer) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		}
 	}
 
-	w.WriteMsg(msg)
+	_ = w.WriteMsg(msg)
 }
 
 // ListenAndServeUDP starts the DNS server on a UDP PacketConn.

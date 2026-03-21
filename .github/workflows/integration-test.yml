@@ -339,7 +339,9 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: bridge-test-logs
-          path: integration_test/bridge/bridge.log
+          path: |
+            integration_test/bridge/bridge.log
+            integration_test/bridge/bridge-test-client.log
           retention-days: 7
 
   cleanup-tailnet:

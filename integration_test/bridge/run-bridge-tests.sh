@@ -202,5 +202,31 @@ else
     tail -20 "$SCRIPT_DIR/bridge.log" || true
 fi
 
+# --- Cross-tailnet connection test ---
+section "Cross-tailnet TCP forwarding"
+
+BRIDGE_VIP_ADDR=$(echo "$BRIDGE_SVCS" | jq -r '.[0].addrs[0]' 2>/dev/null || true)
+if [ -z "$BRIDGE_VIP_ADDR" ] || [ "$BRIDGE_VIP_ADDR" = "null" ]; then
+    test_fail "cross-tailnet TCP" "no VIP address available for connection test"
+else
+    echo "Building test client..."
+    go build -o /tmp/bridge-test-client-$$ "$SCRIPT_DIR/test-client"
+
+    echo "Running connection test (VIP: $BRIDGE_VIP_ADDR:80)..."
+    BRIDGE_VIP_ADDR="$BRIDGE_VIP_ADDR" \
+    BRIDGE_VIP_PORT="80" \
+    TAILNET2_TS_CLIENT_ID="$TAILNET2_TS_CLIENT_ID" \
+    TAILNET2_TS_CLIENT_SECRET="$TAILNET2_TS_CLIENT_SECRET" \
+    timeout 120 /tmp/bridge-test-client-$$ 2>&1 | tee -a "$SCRIPT_DIR/bridge-test-client.log"
+
+    if [ ${PIPESTATUS[0]} -eq 0 ]; then
+        test_pass "cross-tailnet TCP forwarding via VIP"
+    else
+        test_fail "cross-tailnet TCP" "connection test failed (see bridge-test-client.log)"
+    fi
+
+    rm -f /tmp/bridge-test-client-$$
+fi
+
 # =====================================================
 print_results

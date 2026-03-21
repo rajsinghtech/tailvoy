@@ -87,6 +87,120 @@ jobs:
             "${{ steps.create.outputs.tailnet_name }}" \
             ./integration_test/scripts/test-acl.json
 
+  setup-bridge-tailnets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      tailnet1_name: ${{ steps.create1.outputs.tailnet_name }}
+      tailnet1_client_id: ${{ steps.create1.outputs.oauth_client_id }}
+      tailnet1_client_secret: ${{ steps.create1.outputs.oauth_client_secret }}
+      tailnet2_name: ${{ steps.create2.outputs.tailnet_name }}
+      tailnet2_client_id: ${{ steps.create2.outputs.oauth_client_id }}
+      tailnet2_client_secret: ${{ steps.create2.outputs.oauth_client_secret }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Get OIDC token
+        id: oidc
+        run: |
+          JWT=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api.tailscale.com/TbqNGJkY5611CNTRL-kz4CwX2LK721CNTRL" \
+            | jq -r '.value')
+          echo "::add-mask::$JWT"
+          echo "jwt=$JWT" >> "$GITHUB_OUTPUT"
+
+      - name: Exchange OIDC token for org access token
+        id: token
+        run: |
+          ACCESS_TOKEN=$(./integration_test/scripts/exchange-oidc-token.sh \
+            "TbqNGJkY5611CNTRL-kz4CwX2LK721CNTRL" \
+            "${{ steps.oidc.outputs.jwt }}")
+          echo "::add-mask::$ACCESS_TOKEN"
+          echo "access_token=$ACCESS_TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: Create tailnet1
+        id: create1
+        run: |
+          DISPLAY_NAME="tailvoy-bridge-tn1-${{ github.run_id }}"
+          CREATE_OUTPUT=$(./integration_test/scripts/create-tailnet.sh \
+            "${{ steps.token.outputs.access_token }}" \
+            "$DISPLAY_NAME")
+
+          TAILNET_NAME=$(echo "$CREATE_OUTPUT" | jq -r '.dnsName // .tailnetName')
+          OAUTH_CLIENT_ID=$(echo "$CREATE_OUTPUT" | jq -r '.oauthClient.id // .oauthClient.oauthClientID')
+          OAUTH_CLIENT_SECRET=$(echo "$CREATE_OUTPUT" | jq -r '.oauthClient.secret // .oauthClient.oauthClientSecret')
+
+          if [ -z "$TAILNET_NAME" ] || [ "$TAILNET_NAME" = "null" ]; then
+            echo "Error: could not extract dnsName from create response" >&2
+            echo "$CREATE_OUTPUT" >&2
+            exit 1
+          fi
+          if [ -z "$OAUTH_CLIENT_ID" ] || [ "$OAUTH_CLIENT_ID" = "null" ]; then
+            echo "Error: could not extract oauthClient.id from create response" >&2
+            exit 1
+          fi
+
+          echo "tailnet_name=$TAILNET_NAME" >> "$GITHUB_OUTPUT"
+          echo "oauth_client_id=$OAUTH_CLIENT_ID" >> "$GITHUB_OUTPUT"
+          echo "oauth_client_secret=$OAUTH_CLIENT_SECRET" >> "$GITHUB_OUTPUT"
+
+      - name: Create tailnet2
+        id: create2
+        run: |
+          DISPLAY_NAME="tailvoy-bridge-tn2-${{ github.run_id }}"
+          CREATE_OUTPUT=$(./integration_test/scripts/create-tailnet.sh \
+            "${{ steps.token.outputs.access_token }}" \
+            "$DISPLAY_NAME")
+
+          TAILNET_NAME=$(echo "$CREATE_OUTPUT" | jq -r '.dnsName // .tailnetName')
+          OAUTH_CLIENT_ID=$(echo "$CREATE_OUTPUT" | jq -r '.oauthClient.id // .oauthClient.oauthClientID')
+          OAUTH_CLIENT_SECRET=$(echo "$CREATE_OUTPUT" | jq -r '.oauthClient.secret // .oauthClient.oauthClientSecret')
+
+          if [ -z "$TAILNET_NAME" ] || [ "$TAILNET_NAME" = "null" ]; then
+            echo "Error: could not extract dnsName from create response" >&2
+            echo "$CREATE_OUTPUT" >&2
+            exit 1
+          fi
+          if [ -z "$OAUTH_CLIENT_ID" ] || [ "$OAUTH_CLIENT_ID" = "null" ]; then
+            echo "Error: could not extract oauthClient.id from create response" >&2
+            exit 1
+          fi
+
+          echo "tailnet_name=$TAILNET_NAME" >> "$GITHUB_OUTPUT"
+          echo "oauth_client_id=$OAUTH_CLIENT_ID" >> "$GITHUB_OUTPUT"
+          echo "oauth_client_secret=$OAUTH_CLIENT_SECRET" >> "$GITHUB_OUTPUT"
+
+      - name: Get tailnet1 token
+        id: token1
+        run: |
+          TOKEN=$(./integration_test/scripts/get-access-token.sh \
+            "${{ steps.create1.outputs.oauth_client_id }}" \
+            "${{ steps.create1.outputs.oauth_client_secret }}")
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: Get tailnet2 token
+        id: token2
+        run: |
+          TOKEN=$(./integration_test/scripts/get-access-token.sh \
+            "${{ steps.create2.outputs.oauth_client_id }}" \
+            "${{ steps.create2.outputs.oauth_client_secret }}")
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: Apply bridge ACL to tailnet1
+        run: |
+          ./integration_test/scripts/update-acl.sh \
+            "${{ steps.token1.outputs.token }}" \
+            "${{ steps.create1.outputs.tailnet_name }}" \
+            ./integration_test/bridge/bridge-acl.json
+
+      - name: Apply bridge ACL to tailnet2
+        run: |
+          ./integration_test/scripts/update-acl.sh \
+            "${{ steps.token2.outputs.token }}" \
+            "${{ steps.create2.outputs.tailnet_name }}" \
+            ./integration_test/bridge/bridge-acl.json
+
   kind-test:
     needs: setup-tailnet
     runs-on: ubuntu-latest
@@ -192,6 +306,44 @@ jobs:
           path: integration_test/docker/docker-compose.log
           retention-days: 7
 
+  bridge-test:
+    needs: setup-bridge-tailnets
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ needs.setup-bridge-tailnets.outputs.tailnet1_client_id }}
+          oauth-secret: ${{ needs.setup-bridge-tailnets.outputs.tailnet1_client_secret }}
+          tags: tag:user
+
+      - name: Run bridge integration tests
+        env:
+          TAILNET1_TS_CLIENT_ID: ${{ needs.setup-bridge-tailnets.outputs.tailnet1_client_id }}
+          TAILNET1_TS_CLIENT_SECRET: ${{ needs.setup-bridge-tailnets.outputs.tailnet1_client_secret }}
+          TAILNET2_TS_CLIENT_ID: ${{ needs.setup-bridge-tailnets.outputs.tailnet2_client_id }}
+          TAILNET2_TS_CLIENT_SECRET: ${{ needs.setup-bridge-tailnets.outputs.tailnet2_client_secret }}
+        run: make bridge-test
+
+      - name: Upload bridge logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bridge-test-logs
+          path: |
+            integration_test/bridge/bridge.log
+            integration_test/bridge/bridge-test-client.log
+          retention-days: 7
+
   cleanup-tailnet:
     if: always()
     needs: [setup-tailnet, kind-test, docker-test]
@@ -215,3 +367,42 @@ jobs:
           ./integration_test/scripts/delete-tailnet.sh \
             "${{ steps.tailnet_token.outputs.tailnet_token }}" \
             "${{ needs.setup-tailnet.outputs.tailnet_name }}"
+
+  cleanup-bridge-tailnets:
+    if: always()
+    needs: [setup-bridge-tailnets, bridge-test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Get tailnet1 token
+        id: token1
+        run: |
+          TOKEN=$(./integration_test/scripts/get-access-token.sh \
+            "${{ needs.setup-bridge-tailnets.outputs.tailnet1_client_id }}" \
+            "${{ needs.setup-bridge-tailnets.outputs.tailnet1_client_secret }}")
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: Get tailnet2 token
+        id: token2
+        run: |
+          TOKEN=$(./integration_test/scripts/get-access-token.sh \
+            "${{ needs.setup-bridge-tailnets.outputs.tailnet2_client_id }}" \
+            "${{ needs.setup-bridge-tailnets.outputs.tailnet2_client_secret }}")
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: Delete tailnet1
+        continue-on-error: true
+        run: |
+          ./integration_test/scripts/delete-tailnet.sh \
+            "${{ steps.token1.outputs.token }}" \
+            "${{ needs.setup-bridge-tailnets.outputs.tailnet1_name }}"
+
+      - name: Delete tailnet2
+        continue-on-error: true
+        run: |
+          ./integration_test/scripts/delete-tailnet.sh \
+            "${{ steps.token2.outputs.token }}" \
+            "${{ needs.setup-bridge-tailnets.outputs.tailnet2_name }}"

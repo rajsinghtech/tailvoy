@@ -15,6 +15,7 @@ import (
 
 	proxyproto "github.com/pires/go-proxyproto"
 	"github.com/rajsinghtech/tailvoy/internal/authz"
+	"github.com/rajsinghtech/tailvoy/internal/bridge"
 	"github.com/rajsinghtech/tailvoy/internal/config"
 	"github.com/rajsinghtech/tailvoy/internal/discovery"
 	"github.com/rajsinghtech/tailvoy/internal/envoy"
@@ -79,6 +80,12 @@ func run(args []string) error {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+
+	// Bridge mode: separate tsnet servers per tailnet, no envoy/authz.
+	if cfg.Bridge != nil {
+		bm := bridge.NewBridgeManager(cfg.Bridge, logger)
+		return bm.Run(ctx)
+	}
 
 	tsClient := &tailscale.Client{
 		Tailnet: "-",

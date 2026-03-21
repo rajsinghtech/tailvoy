@@ -14,6 +14,11 @@
             "src": ["tag:user"],
             "dst": ["tag:bridge-svc", "tag:bridge"],
             "ip": ["*"]
+        },
+        {
+            "src": ["tag:bridge"],
+            "dst": ["tag:user"],
+            "ip": ["*"]
         }
     ]
 }

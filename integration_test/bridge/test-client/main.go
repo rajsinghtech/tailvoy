@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -17,11 +18,10 @@ import (
 func main() {
 	vipAddr := os.Getenv("BRIDGE_VIP_ADDR")
 	vipPort := os.Getenv("BRIDGE_VIP_PORT")
-	clientID := os.Getenv("TAILNET2_TS_CLIENT_ID")
 	clientSecret := os.Getenv("TAILNET2_TS_CLIENT_SECRET")
 
-	if vipAddr == "" || vipPort == "" || clientID == "" || clientSecret == "" {
-		log.Fatal("BRIDGE_VIP_ADDR, BRIDGE_VIP_PORT, TAILNET2_TS_CLIENT_ID, TAILNET2_TS_CLIENT_SECRET required")
+	if vipAddr == "" || vipPort == "" || clientSecret == "" {
+		log.Fatal("BRIDGE_VIP_ADDR, BRIDGE_VIP_PORT, TAILNET2_TS_CLIENT_SECRET required")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
@@ -45,7 +45,17 @@ func main() {
 	}
 	log.Println("connected to tailnet2")
 
-	httpClient := srv.HTTPClient()
+	// Use srv.Dial with per-attempt timeouts so we retry if the VIP route
+	// hasn't propagated yet, instead of blocking forever.
+	httpClient := &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(dialCtx context.Context, network, addr string) (net.Conn, error) {
+				return srv.Dial(dialCtx, network, addr)
+			},
+		},
+		Timeout: 10 * time.Second,
+	}
+
 	target := fmt.Sprintf("http://%s:%s/", vipAddr, vipPort)
 
 	var lastErr error
@@ -57,12 +67,12 @@ func main() {
 		if err != nil {
 			lastErr = err
 			log.Printf("  error: %v", err)
-			time.Sleep(2 * time.Second)
+			time.Sleep(3 * time.Second)
 			continue
 		}
 
 		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 
 		log.Printf("  status: %d, body: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 
@@ -72,7 +82,7 @@ func main() {
 		}
 
 		lastErr = fmt.Errorf("unexpected status: %d", resp.StatusCode)
-		time.Sleep(2 * time.Second)
+		time.Sleep(3 * time.Second)
 	}
 
 	log.Fatalf("FAIL: cross-tailnet connection test failed after 30 attempts: %v", lastErr)

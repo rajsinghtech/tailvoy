@@ -9,7 +9,7 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20251222181119-0a764e51fe1b
 	google.golang.org/grpc v1.79.3
 	gopkg.in/yaml.v3 v3.0.1
-	tailscale.com v1.96.2
+	tailscale.com v1.96.3
 	tailscale.com/client/tailscale/v2 v2.9.0
 )
 

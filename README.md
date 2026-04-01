@@ -148,6 +148,71 @@ spec:
           port: 9001
 ```
 
+### Bridge mode
+
+tailvoy can bridge two tailnets by discovering machines on one and exposing them as VIP services on the other. Each discovered machine gets its own VIP address on the destination tailnet. TCP connections are forwarded transparently. An integrated DNS server resolves original machine FQDNs to their bridged VIP IPs, with automatic split-DNS configuration.
+
+```yaml
+bridge:
+  tailnets:
+    tailnet1:
+      clientId: ${TAILNET1_TS_CLIENT_ID}
+      clientSecret: ${TAILNET1_TS_CLIENT_SECRET}
+      tags: ["tag:bridge"]
+    tailnet2:
+      clientId: ${TAILNET2_TS_CLIENT_ID}
+      clientSecret: ${TAILNET2_TS_CLIENT_SECRET}
+      tags: ["tag:bridge"]
+
+  directions:
+    "tailnet1>tailnet2":
+      serviceTags: ["tag:bridge-svc"]
+      dns:
+        enabled: true
+        splitDns: true
+    "tailnet2>tailnet1":
+      serviceTags: ["tag:bridge-svc"]
+
+  rules:
+    - from: tailnet1
+      to: tailnet2
+      discover:
+        tags: ["tag:server"]
+        ports: [22, 80, 443]
+
+  pollInterval: 30s
+  dialTimeout: 10s
+```
+
+```sh
+tailvoy -config bridge-config.yaml
+```
+
+Machines on tailnet1 tagged `tag:server` become reachable from tailnet2 on ports 22, 80, and 443. Each machine gets a VIP service named `svc:{prefix}{hostname-fqdn}` on tailnet2. With DNS enabled, clients on tailnet2 can reach them by their original FQDN -- split-DNS routes the source tailnet's domain to the bridge's DNS server.
+
+Bridge mode is mutually exclusive with standalone and discovery modes. Each tailnet entry gets its own tsnet.Server instance with separate OAuth credentials. Direction is configurable per rule -- use rules in both directions for bidirectional bridging.
+
+Required ACL on each tailnet:
+
+```jsonc
+{
+    "tagOwners": {
+        "tag:bridge": ["autogroup:admin"],
+        "tag:bridge-svc": ["tag:bridge"]
+    },
+    "autoApprovers": {
+        // Tag-based: auto-approve any service tagged tag:bridge-svc created by tag:bridge
+        "services": { "tag:bridge-svc": ["tag:bridge"] }
+    },
+    "grants": [
+        // Clients can reach bridged services
+        { "src": ["autogroup:member"], "dst": ["tag:bridge-svc"], "ip": ["*"] },
+        // Bridge can reach machines it discovers
+        { "src": ["tag:bridge"], "dst": ["tag:server"], "ip": ["*"] }
+    ]
+}
+```
+
 ## Configuration
 
 ### Tailscale
@@ -292,6 +357,24 @@ contextExtensions:
     type: Value
     value: "default/eg/http"
 ```
+
+### Bridge
+
+Bridge mode is configured entirely under the `bridge:` key. Mutually exclusive with `tailscale:`/`listeners:`/`discovery:`.
+
+| Field | Description |
+|-------|-------------|
+| `bridge.tailnets` | Map of logical name to OAuth credentials and node tags. Keys must be `[a-z0-9-]+`. |
+| `bridge.directions` | Per-direction settings keyed by `"from>to"`. `serviceTags` is required. |
+| `bridge.directions.*.prefix` | Optional string prepended to generated VIP service names. |
+| `bridge.directions.*.dns.enabled` | Run a DNS server on the destination tailnet for this direction. |
+| `bridge.directions.*.dns.splitDns` | Auto-configure split-DNS on the destination tailnet via API. |
+| `bridge.directions.*.dns.cleanupOnShutdown` | Remove split-DNS entries on graceful shutdown (default: false). |
+| `bridge.rules` | List of discovery rules. Each specifies `from`, `to`, `discover.tags`, and `discover.ports`. |
+| `bridge.pollInterval` | Device discovery polling interval (default: 30s, minimum: 5s). |
+| `bridge.dialTimeout` | Timeout for dialing source machines (default: 10s). |
+
+VIP service names are derived from machine FQDNs: `svc:{prefix}{hostname-with-dots-as-hyphens}`. Names exceeding 63 characters are truncated with a 7-character SHA-256 hash suffix.
 
 ## Authorization
 
@@ -443,6 +526,7 @@ make test              # unit tests with race detector
 make lint              # golangci-lint
 make integration-test  # docker compose tests (requires TS_CLIENT_ID, TS_CLIENT_SECRET)
 make kind-test         # kind cluster tests with Envoy Gateway
+make bridge-test       # cross-tailnet bridge tests (requires two tailnet credential sets)
 make docker-build      # build container image
 ```
 

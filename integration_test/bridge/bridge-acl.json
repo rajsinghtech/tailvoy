@@ -1,0 +1,24 @@
+{
+    "tagOwners": {
+        "tag:bridge": ["autogroup:admin"],
+        "tag:bridge-svc": ["tag:bridge"],
+        "tag:user": ["autogroup:admin"]
+    },
+    "autoApprovers": {
+        "services": {
+            "tag:bridge-svc": ["tag:bridge"]
+        }
+    },
+    "grants": [
+        {
+            "src": ["tag:user"],
+            "dst": ["tag:bridge-svc", "tag:bridge"],
+            "ip": ["*"]
+        },
+        {
+            "src": ["tag:bridge"],
+            "dst": ["tag:user"],
+            "ip": ["*"]
+        }
+    ]
+}

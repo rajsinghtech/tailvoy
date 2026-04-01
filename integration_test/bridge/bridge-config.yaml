@@ -1,0 +1,40 @@
+bridge:
+  tailnets:
+    tailnet1:
+      clientId: ${TAILNET1_TS_CLIENT_ID}
+      clientSecret: ${TAILNET1_TS_CLIENT_SECRET}
+      tags: ["tag:bridge"]
+    tailnet2:
+      clientId: ${TAILNET2_TS_CLIENT_ID}
+      clientSecret: ${TAILNET2_TS_CLIENT_SECRET}
+      tags: ["tag:bridge"]
+
+  directions:
+    "tailnet1>tailnet2":
+      serviceTags: ["tag:bridge-svc"]
+      dns:
+        enabled: true
+        splitDns: true
+        cleanupOnShutdown: true
+    "tailnet2>tailnet1":
+      serviceTags: ["tag:bridge-svc"]
+      dns:
+        enabled: true
+        splitDns: true
+        cleanupOnShutdown: true
+
+  rules:
+    - from: tailnet1
+      to: tailnet2
+      discover:
+        tags: ["tag:user"]
+        ports: [8080]
+
+    - from: tailnet2
+      to: tailnet1
+      discover:
+        tags: ["tag:user"]
+        ports: [8080]
+
+  pollInterval: 10s
+  dialTimeout: 10s

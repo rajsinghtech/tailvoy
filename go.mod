@@ -1,6 +1,6 @@
 module github.com/rajsinghtech/tailvoy
 
-go 1.26.2
+go 1.26.3
 
 require (
 	github.com/envoyproxy/go-control-plane/envoy v1.37.0
@@ -9,7 +9,7 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260226221140-a57be14db171
 	google.golang.org/grpc v1.81.0
 	gopkg.in/yaml.v3 v3.0.1
-	tailscale.com v1.98.1
+	tailscale.com v1.98.2
 	tailscale.com/client/tailscale/v2 v2.9.0
 )
 

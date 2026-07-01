@@ -6,8 +6,8 @@ require (
 	github.com/envoyproxy/go-control-plane/envoy v1.37.0
 	github.com/pires/go-proxyproto v0.12.0
 	golang.org/x/sync v0.20.0
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20260226221140-a57be14db171
-	google.golang.org/grpc v1.81.1
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260414002931-afd174a4e478
+	google.golang.org/grpc v1.82.0
 	gopkg.in/yaml.v3 v3.0.1
 	tailscale.com v1.100.0
 	tailscale.com/client/tailscale/v2 v2.10.1

@@ -7,7 +7,7 @@ require (
 	github.com/pires/go-proxyproto v0.15.0
 	golang.org/x/sync v0.22.0
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260414002931-afd174a4e478
-	google.golang.org/grpc v1.82.0
+	google.golang.org/grpc v1.82.1
 	gopkg.in/yaml.v3 v3.0.1
 	tailscale.com v1.100.0
 	tailscale.com/client/tailscale/v2 v2.10.1

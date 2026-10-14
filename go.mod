@@ -10,7 +10,7 @@ require (
 	google.golang.org/grpc v1.84.0
 	gopkg.in/yaml.v3 v3.0.1
 	tailscale.com v1.104.0
-	tailscale.com/client/tailscale/v2 v2.11.0
+	tailscale.com/client/tailscale/v2 v2.12.0
 )
 
 require (

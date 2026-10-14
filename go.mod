@@ -5,7 +5,7 @@ go 1.27.1
 require (
 	github.com/envoyproxy/go-control-plane/envoy v1.39.0
 	github.com/pires/go-proxyproto v0.15.0
-	golang.org/x/sync v0.23.0
+	golang.org/x/sync v0.24.0
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260706201446-f0a921348800
 	google.golang.org/grpc v1.84.0
 	gopkg.in/yaml.v3 v3.0.1

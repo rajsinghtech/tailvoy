@@ -1,6 +1,6 @@
 module github.com/rajsinghtech/tailvoy
 
-go 1.27.3
+go 1.27.4
 
 require (
 	github.com/envoyproxy/go-control-plane/envoy v1.40.0
@@ -9,7 +9,7 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260817212433-ac3dfec99bb1
 	google.golang.org/grpc v1.85.0
 	gopkg.in/yaml.v3 v3.0.1
-	tailscale.com v1.104.4
+	tailscale.com v1.104.7
 	tailscale.com/client/tailscale/v2 v2.12.0
 )
 
@@ -43,7 +43,7 @@ require (
 	github.com/tailscale/hujson v0.0.0-20260727124030-b80ff77dac4f // indirect
 	github.com/tailscale/peercred v0.0.0-20250107143737-35a0c7bd7edc // indirect
 	github.com/tailscale/web-client-prebuilt v0.0.0-20260917222731-e0ed2d0d0fea // indirect
-	github.com/tailscale/wireguard-go v0.0.0-20260928213032-417aef361226 // indirect
+	github.com/tailscale/wireguard-go v0.0.0-20261106233718-9e0ab45c16ca // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	go4.org/mem v0.0.0-20240501181205-ae6ca9944745 // indirect
 	go4.org/netipx v0.0.0-20260823151212-3075585bcbeb // indirect
